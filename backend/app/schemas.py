@@ -1,10 +1,10 @@
-from typing import Literal
+from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ChatRequest(BaseModel):
-    question: str = Field(min_length=1, max_length=1000)
+    question: str = Field(min_length=1, max_length=2000)
     conversation_id: int | None = None
 
 
@@ -13,6 +13,32 @@ class ChatResponse(BaseModel):
     answer: str
     table: list[list[str]] | None = None
     conversation_id: int | None = None
+    generated_query: str | None = None
+
+
+class PublicChatRequest(BaseModel):
+    message: Optional[str] = Field(default=None, max_length=2000)
+    question: Optional[str] = Field(default=None, max_length=2000)
+    conversation_id: Optional[int] = None
+
+    @model_validator(mode="after")
+    def validate_message_present(self):
+        text = self.message or self.question
+        if not text or not text.strip():
+            raise ValueError("Field 'message' or 'question' is required.")
+        return self
+
+    @property
+    def query_text(self) -> str:
+        return (self.message or self.question or "").strip()
+
+
+class PublicChatResponse(BaseModel):
+    response: str
+    generated_query: Optional[str] = None
+    status: Literal["success", "error"] = "success"
+    conversation_id: Optional[int] = None
+    table: Optional[list[list[str]]] = None
 
 
 class ConversationTitleUpdate(BaseModel):
@@ -20,7 +46,19 @@ class ConversationTitleUpdate(BaseModel):
 
 
 class Intent(BaseModel):
-    operation: Literal["chat", "out_of_scope", "record", "aggregate", "group_by_support", "range_records", "difference", "highest", "day_records"]
+    operation: Literal[
+        "chat",
+        "out_of_scope",
+        "record",
+        "aggregate",
+        "group_by_support",
+        "range_records",
+        "difference",
+        "highest",
+        "day_records",
+        "row_count",
+        "mutation_refusal",
+    ]
     metric: Literal["actual", "theoretical", "both"] | None = None
     date: str | None = None
     day: int | None = None
@@ -32,4 +70,3 @@ class Intent(BaseModel):
     start_ch: float | None = None
     end_ch: float | None = None
     aggregate: Literal["sum", "avg", "min", "max"] | None = None
-

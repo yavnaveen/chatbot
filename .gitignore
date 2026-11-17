@@ -9,3 +9,5 @@ frontend/*.tsbuildinfo
 .env.*
 !.env.example
 *.log
+cloudflared.exe
+cloudflared

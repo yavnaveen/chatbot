@@ -52,6 +52,8 @@ def build_query(intent: Intent) -> Select:
     def filtered(statement: Select) -> Select:
         return statement.where(where) if where is not None else statement
 
+    if intent.operation == "row_count":
+        return filtered(select(func.count(ExcavationRecord.id)))
     if intent.operation == "record":
         return filtered(select(ExcavationRecord)).order_by(ExcavationRecord.date)
     if intent.operation == "range_records":

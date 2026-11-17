@@ -6,6 +6,18 @@ type Conversation = { id: number; title: string; updated_at?: string }
 type ChatMessage = { role: 'user' | 'assistant'; content: string; rows?: string[][]; created_at?: string }
 type ChatResponse = { success: boolean; answer: string; table?: string[][] | null; conversation_id: number }
 
+const API_BASE = 'http://127.0.0.1:8000'
+const DEFAULT_API_KEY = '3Wl2M691mvWR1TsJteWUav8r_n5No3MutqPmRV89D2U'
+
+function getHeaders(customHeaders: Record<string, string> = {}): Record<string, string> {
+  const key = localStorage.getItem('tunnel-api-key') || DEFAULT_API_KEY
+  return {
+    'Content-Type': 'application/json',
+    ...(key ? { 'X-API-Key': key } : {}),
+    ...customHeaders,
+  }
+}
+
 function cleanAnswer(text: string): string {
   return text.replace(/<think>[\s\S]*?(<\/think>|$)/g, '').trim()
 }
@@ -25,14 +37,14 @@ function App() {
   const bottomRef = useRef<HTMLDivElement>(null)
 
   async function loadConversations() {
-    const response = await fetch('http://127.0.0.1:8000/api/conversations')
+    const response = await fetch(`${API_BASE}/api/conversations`, { headers: getHeaders() })
     const data: Conversation[] = await response.json()
     setConversations(data)
     if (activeId && data.some((item) => item.id === activeId)) await loadMessages(activeId)
   }
 
   async function loadMessages(id: number) {
-    const response = await fetch(`http://127.0.0.1:8000/api/conversations/${id}/messages`)
+    const response = await fetch(`${API_BASE}/api/conversations/${id}/messages`, { headers: getHeaders() })
     if (!response.ok) throw new Error('Could not load conversation')
     setMessages(await response.json())
   }
@@ -57,13 +69,13 @@ function App() {
   async function renameConversation(id: number) {
     const title = editingTitle.trim()
     if (!title) return
-    await fetch(`http://127.0.0.1:8000/api/conversations/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title }) })
+    await fetch(`${API_BASE}/api/conversations/${id}`, { method: 'PATCH', headers: getHeaders(), body: JSON.stringify({ title }) })
     setConversations((items) => items.map((item) => item.id === id ? { ...item, title } : item))
     setEditingId(null)
   }
 
   async function deleteConversation(id: number) {
-    await fetch(`http://127.0.0.1:8000/api/conversations/${id}`, { method: 'DELETE' })
+    await fetch(`${API_BASE}/api/conversations/${id}`, { method: 'DELETE', headers: getHeaders() })
     setConversations((items) => items.filter((item) => item.id !== id))
     if (activeId === id) newChat()
   }
@@ -75,9 +87,9 @@ function App() {
     setMessages((items) => [...items, { role: 'user', content: text }])
     setLoading(true)
     try {
-      const response = await fetch('http://127.0.0.1:8000/api/chat', {
+      const response = await fetch(`${API_BASE}/api/chat`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getHeaders(),
         body: JSON.stringify({ question: text, ...(activeId ? { conversation_id: activeId } : {}) }),
       })
       if (!response.ok) throw new Error('Backend error')
