@@ -289,9 +289,22 @@ async def execute_chat(
                     table = [["Date", "Pull", "Support Class"]]
                     table.extend([[item.date, _number(item.pull), item.support_class] for item in records])
                     return finish(True, answer, table, intent, generated_query=compiled_sql)
-                answer = "; ".join(record_answer(item, intent.metric) for item in records)
-                table = [["Date", "Support Class", "Theoretical", "Actual"]]
-                table.extend([[item.date, item.support_class, _number(item.theoretical_volume), _number(item.actual_volume)] for item in records])
+                if len(records) == 1:
+                    answer = record_answer(records[0], intent.metric)
+                else:
+                    date_range_str = f" from {records[0].date} to {records[-1].date}" if records else ""
+                    answer = f"Found {len(records)} excavation record(s){date_range_str}:"
+                table = [["Date", "Pull", "Support Class", "Theoretical", "Actual"]]
+                table.extend([
+                    [
+                        item.date,
+                        _number(item.pull),
+                        item.support_class,
+                        _number(item.theoretical_volume),
+                        _number(item.actual_volume),
+                    ]
+                    for item in records
+                ])
                 return finish(True, answer, table, intent, generated_query=compiled_sql)
 
             if intent.operation == "highest":

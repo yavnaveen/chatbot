@@ -62,18 +62,67 @@ CHAT_PROMPT = """You are Tunnel Excavation AI. Always reply in English. Handle o
 
 MONTHS = {
     "january": 1,
+    "jan": 1,
     "february": 2,
+    "feb": 2,
     "march": 3,
+    "mar": 3,
     "april": 4,
+    "apr": 4,
     "may": 5,
     "june": 6,
+    "jun": 6,
     "july": 7,
+    "jul": 7,
     "august": 8,
+    "aug": 8,
     "september": 9,
+    "sep": 9,
+    "sept": 9,
     "october": 10,
+    "oct": 10,
     "november": 11,
+    "nov": 11,
     "december": 12,
+    "dec": 12,
 }
+
+
+def extract_dates_from_text(text: str) -> list[str]:
+    """Extract standard 'DD-MM-YYYY' dates from standard format or natural English/Hinglish language."""
+    text_lower = text.lower()
+
+    # 1. Standard DD-MM-YYYY or DD/MM/YYYY
+    std = re.findall(r"\b\d{1,2}[-/]\d{1,2}[-/]\d{4}\b", text_lower)
+    if std:
+        return [re.sub(r"/", "-", item) for item in std]
+
+    month_pattern = r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+
+    # 2. Natural range e.g. "1 Jan to 15 Jan", "from 1 Jan to 15 Jan", "1 to 15 Jan", "1 Jan se 15 Jan"
+    range_match = re.search(
+        rf"(\d{{1,2}})\s*(?:st|nd|rd|th)?\s*({month_pattern})?\s*(?:to|and|-|se|tak)\s*(\d{{1,2}})\s*(?:st|nd|rd|th)?\s*({month_pattern})\s*(\d{{4}})?",
+        text_lower,
+    )
+    if range_match:
+        d1, m1, d2, m2, y = range_match.groups()
+        m2_num = MONTHS.get(m2, 1)
+        m1_num = MONTHS.get(m1, m2_num)
+        year = int(y) if y else 2025
+        return [f"{int(d1):02d}-{m1_num:02d}-{year}", f"{int(d2):02d}-{m2_num:02d}-{year}"]
+
+    # 3. Natural single date e.g. "12 Jan", "15th January 2025"
+    single_match = re.search(
+        rf"(\d{{1,2}})\s*(?:st|nd|rd|th)?\s*({month_pattern})\s*(\d{{4}})?",
+        text_lower,
+    )
+    if single_match:
+        d, m_name, y = single_match.groups()
+        m_num = MONTHS.get(m_name, 1)
+        year = int(y) if y else 2025
+        return [f"{int(d):02d}-{m_num:02d}-{year}"]
+
+    return []
 
 FORBIDDEN_SQL_KEYWORDS = (
     "DROP", "DELETE", "UPDATE", "INSERT", "ALTER", "TRUNCATE",
@@ -94,6 +143,36 @@ def clean_sql_query(raw_query: str) -> str:
         cleaned = cleaned[select_match.start():]
     # Remove any trailing semicolons or comments
     cleaned = cleaned.split(";")[0].strip()
+
+    # Automatic SQL Sanitizer: Ensure correct chronological date comparisons in SQLite for DD-MM-YYYY strings
+    def _to_iso_date(d: str) -> str:
+        parts = d.split("-")
+        return f"{parts[2]}-{parts[1]}-{parts[0]}" if len(parts) == 3 else d
+
+    # Transform: `date BETWEEN 'DD-MM-YYYY' AND 'DD-MM-YYYY'` -> ISO date between
+    cleaned = re.sub(
+        r"\bdate\s+BETWEEN\s+'(\d{2}-\d{2}-\d{4})'\s+AND\s+'(\d{2}-\d{2}-\d{4})'",
+        lambda m: f"(substr(date, 7, 4) || '-' || substr(date, 4, 2) || '-' || substr(date, 1, 2)) BETWEEN '{_to_iso_date(m.group(1))}' AND '{_to_iso_date(m.group(2))}'",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+
+    # Transform: `date >= 'DD-MM-YYYY'` -> ISO date comparison
+    cleaned = re.sub(
+        r"\bdate\s*(>=|<=|>|<)\s*'(\d{2}-\d{2}-\d{4})'",
+        lambda m: f"(substr(date, 7, 4) || '-' || substr(date, 4, 2) || '-' || substr(date, 1, 2)) {m.group(1)} '{_to_iso_date(m.group(2))}'",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+
+    # Transform: `ORDER BY date` -> chronological date order
+    cleaned = re.sub(
+        r"\bORDER\s+BY\s+date\b(\s+(?:ASC|DESC))?",
+        r"ORDER BY (substr(date, 7, 4) || '-' || substr(date, 4, 2) || '-' || substr(date, 1, 2))\1",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+
     return cleaned
 
 
@@ -165,8 +244,7 @@ def fallback_intent(question: str, previous_intent: Intent | None = None) -> Int
         return Intent(operation="range_records", metric="both")
 
     metric = "theoretical" if "theoretical" in text_val or "सैद्धांतिक" in text_val else "actual" if "actual" in text_val or "वास्तविक" in text_val else "both"
-    dates = re.findall(r"\b\d{1,2}[-/]\d{1,2}[-/]\d{4}\b", text_val)
-    dates = [re.sub(r"/", "-", item) for item in dates]
+    dates = extract_dates_from_text(text_val)
     support_match = re.search(r"(?:support\s*class|class)\s*([a-f])\b|\b([a-f])\s*class\b", text_val)
     support_class = (support_match.group(1) or support_match.group(2)).upper() if support_match else None
     day_match = re.search(r"\b(\d{1,2})\s*(?:ko|date|tarikh|तारीख)\b", text_val)
@@ -195,7 +273,7 @@ def fallback_intent(question: str, previous_intent: Intent | None = None) -> Int
             start_ch=float(chainage.group(1)),
             end_ch=float(chainage.group(2)),
         )
-    if len(dates) >= 2 and ("between" in text_val or "from" in text_val):
+    if len(dates) >= 2:
         return Intent(operation="range_records", metric=metric, start_date=dates[0], end_date=dates[1])
     if dates:
         return Intent(operation="record", metric=metric, date=dates[0])
@@ -273,7 +351,7 @@ async def generate_sql_or_chat(
 
     try:
         logging.info("Calling %s for Text-to-SQL generation...", active_model)
-        timeout_config = httpx.Timeout(20.0, connect=2.0)
+        timeout_config = httpx.Timeout(60.0, connect=5.0)
         async with httpx.AsyncClient(timeout=timeout_config) as client:
             res = await client.post(f"{OLLAMA_URL}/api/generate", json=payload)
             res.raise_for_status()
