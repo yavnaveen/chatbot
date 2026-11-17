@@ -325,9 +325,9 @@ def fallback_intent(
     if dates:
         return Intent(operation="record", metric=metric, date=dates[0])
 
-    # Day range check without explicit month (e.g. "give me data 1 to 5", "1 to 5", "from 1 to 10", "1 se 5")
+    # Day range check without explicit month (e.g. "give me data 1 to 5", "1 to5", "1to5", "1-5", "from 1 to 10", "1 se 5")
     day_range_match = re.search(
-        r"\b(?:days?|tarikh|date)?\s*(?:from|between)?\s*(\d{1,2})\s*(?:st|nd|rd|th)?\s*(?:to|and|-|se|tak)\s*(\d{1,2})\s*(?:st|nd|rd|th)?\b",
+        r"(?:days?|tarikh|date)?\s*(?:from|between)?\s*(\d{1,2})\s*(?:st|nd|rd|th)?\s*(?:to|-|and|se|tak)\s*(\d{1,2})\s*(?:st|nd|rd|th)?",
         text_val,
     )
     if day_range_match and not dates:

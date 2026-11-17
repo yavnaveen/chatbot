@@ -28,6 +28,7 @@ from backend.app.ollama import (
     chat_reply,
     check_ollama_health,
     classify_question,
+    extract_dates_from_text,
     fallback_intent,
     generate_sql_or_chat,
     validate_safe_read_query,
@@ -247,8 +248,12 @@ async def execute_chat(
             return finish(True, answer, intent=None, generated_query=None)
 
         # Step 2: Attempt zero-shot Text-to-SQL generation using qwen2.5-coder:7b
-        # If intent already has verified specific date range parameters, execute verified query builder directly for 100% precision
-        if not (intent.operation == "range_records" and intent.start_date and intent.end_date):
+        # If intent already has verified specific date or day range parameters, execute verified query builder directly for 100% precision
+        has_verified_range = (
+            (intent.operation == "range_records" and intent.start_date and intent.end_date)
+            or (intent.operation == "day_range" and intent.start_day and intent.end_day)
+        )
+        if not has_verified_range:
             try:
                 category, content = await generate_sql_or_chat(question, history)
                 if category == "mutation_refusal":
@@ -328,7 +333,11 @@ async def execute_chat(
                     answer = record_answer(records[0], intent.metric)
                 else:
                     date_range_str = f" from {records[0].date} to {records[-1].date}" if records else ""
-                    answer = f"Found {len(records)} excavation record(s){date_range_str}:"
+                    context_note = ""
+                    if intent.month and not extract_dates_from_text(question):
+                        month_name = {1: "January", 2: "February"}.get(intent.month, f"Month {intent.month}")
+                        context_note = f" (auto-resolved from previous {month_name} context)"
+                    answer = f"Found {len(records)} excavation record(s){date_range_str}{context_note}:"
                 table = [["Date", "Pull", "Support Class", "Theoretical", "Actual"]]
                 table.extend([
                     [
