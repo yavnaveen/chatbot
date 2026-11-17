@@ -197,7 +197,13 @@ function App() {
     const response = await fetch(`${API_BASE}/api/conversations`, { headers: getHeaders() })
     const data: Conversation[] = await response.json()
     setConversations(data)
-    if (activeId && data.some((item) => item.id === activeId)) await loadMessages(activeId)
+    if (activeId && !data.some((item) => item.id === activeId)) {
+      setActiveId(null)
+      localStorage.removeItem('tunnel-active-conversation')
+      setMessages([])
+    } else if (activeId && data.some((item) => item.id === activeId)) {
+      await loadMessages(activeId)
+    }
   }
 
   async function loadMessages(id: number) {
@@ -272,17 +278,25 @@ function App() {
     setMessages((items) => [...items, { role: 'user', content: text }])
     setLoading(true)
     try {
-      const response = await fetch(`${API_BASE}/api/chat`, {
+      let response = await fetch(`${API_BASE}/api/chat`, {
         method: 'POST',
         headers: getHeaders(),
         body: JSON.stringify({ question: text, ...(activeId ? { conversation_id: activeId } : {}) }),
       })
+      if (response.status === 404 && activeId) {
+        // Stale conversation from previous database reset; auto-heal and create fresh chat
+        setActiveId(null)
+        localStorage.removeItem('tunnel-active-conversation')
+        response = await fetch(`${API_BASE}/api/chat`, {
+          method: 'POST',
+          headers: getHeaders(),
+          body: JSON.stringify({ question: text }),
+        })
+      }
       if (!response.ok) throw new Error('Backend error')
       const data: ChatResponse = await response.json()
-      if (activeId === null) {
-        setActiveId(data.conversation_id)
-        localStorage.setItem('tunnel-active-conversation', String(data.conversation_id))
-      }
+      setActiveId(data.conversation_id)
+      localStorage.setItem('tunnel-active-conversation', String(data.conversation_id))
       setMessages((items) => [
         ...items,
         {
