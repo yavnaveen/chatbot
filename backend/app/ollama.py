@@ -452,7 +452,7 @@ async def classify_question(
     data_words = ("excavation", "pull", "support", "class", "chainage", "volume", "table", "data", "row", "record")
     if any(w in question.casefold() for w in data_words):
         return Intent(operation="range_records", metric="both")
-    return Intent(operation="chat")
+    return Intent(operation="out_of_scope")
 
 
 async def chat_reply(question: str, history: list[dict[str, str]] | None = None) -> str:
