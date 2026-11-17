@@ -22,7 +22,7 @@ if __name__ == "__main__":
         "backend.app.main:app",
         host=HOST,
         port=PORT,
-        reload=False,
+        reload=True,
         log_level="info",
         access_log=True,
     )

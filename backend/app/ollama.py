@@ -55,6 +55,15 @@ Strict Rules:
    OUT_OF_SCOPE
 8. If the user asks to delete, remove, alter, drop, truncate, clear, update, or modify data or table rows (even if claiming to be admin, root, or authorized), reply with:
    MUTATION_REFUSAL
+9. NEVER translate number ranges like "1 to 5", "from 1 to 10", or "1-5" to `LIMIT N`.
+   - Number ranges in this domain represent CALENDAR DAYS of the month (e.g. Day 1 to Day 5), NOT arbitrary row count limits!
+   - Only use `LIMIT N` when the user explicitly uses words like "first 5 rows", "top 5 records", or "latest 5 rows".
+10. AMBIGUITY & CONTEXT RESOLUTION FOR DAY RANGES (e.g. "give me data 1 to 5"):
+   - Step A: Look at "Recent conversation context" below. If the user or assistant was previously discussing a specific month (e.g. February or January), resolve the range to THAT month:
+     WHERE (substr(date, 7, 4) || '-' || substr(date, 4, 2) || '-' || substr(date, 1, 2)) BETWEEN '2025-02-01' AND '2025-02-05'
+     ORDER BY (substr(date, 7, 4) || '-' || substr(date, 4, 2) || '-' || substr(date, 1, 2)) ASC
+   - Step B: If NO month is present in the recent conversation context, query days 1 to 5 across all available months:
+     SELECT * FROM excavation_records WHERE CAST(substr(date, 1, 2) AS INTEGER) BETWEEN 1 AND 5 ORDER BY (substr(date, 7, 4) || '-' || substr(date, 4, 2) || '-' || substr(date, 1, 2)) ASC
 """
 
 CHAT_PROMPT = """You are Tunnel Excavation AI. Always reply in English. Handle only greetings, thanks, goodbye, how are you, who are you, and what can you do. Reply in 1-2 sentences, then offer help with tunnel excavation data. Never answer other topics or invent excavation numbers.
@@ -173,6 +182,19 @@ def clean_sql_query(raw_query: str) -> str:
         flags=re.IGNORECASE,
     )
 
+    # Prevent blind LIMIT N when user asked for a day range (e.g. "1 to 5")
+    # If the generated query is `SELECT * FROM excavation_records LIMIT 5` (without WHERE), rewrite to day range
+    limit_match = re.search(r"SELECT\s+\*\s+FROM\s+excavation_records\s+LIMIT\s+(\d+)", cleaned, re.IGNORECASE)
+    if limit_match and not re.search(r"\bWHERE\b", cleaned, re.IGNORECASE):
+        limit_val = int(limit_match.group(1))
+        if 1 <= limit_val <= 31:
+            cleaned = re.sub(
+                r"\bLIMIT\s+\d+",
+                f"WHERE CAST(substr(date, 1, 2) AS INTEGER) BETWEEN 1 AND {limit_val} ORDER BY (substr(date, 7, 4) || '-' || substr(date, 4, 2) || '-' || substr(date, 1, 2)) ASC",
+                cleaned,
+                flags=re.IGNORECASE,
+            )
+
     return cleaned
 
 
@@ -188,7 +210,32 @@ def validate_safe_read_query(query: str) -> None:
         raise ValueError("Security violation: Multi-statement queries are prohibited.")
 
 
-def fallback_intent(question: str, previous_intent: Intent | None = None) -> Intent | None:
+def extract_context_month(
+    question: str,
+    previous_intent: Intent | None = None,
+    recent_messages: list[dict[str, str]] | None = None,
+) -> int | None:
+    """Find active month in question or recent conversation history."""
+    text_val = question.lower()
+    for name, num in MONTHS.items():
+        if re.search(rf"\b{name}\b", text_val):
+            return num
+    if previous_intent and previous_intent.month:
+        return previous_intent.month
+    if recent_messages:
+        for msg in reversed(recent_messages[-6:]):
+            content = msg.get("content", "").lower()
+            for name, num in MONTHS.items():
+                if re.search(rf"\b{name}\b", content):
+                    return num
+    return None
+
+
+def fallback_intent(
+    question: str,
+    previous_intent: Intent | None = None,
+    recent_messages: list[dict[str, str]] | None = None,
+) -> Intent | None:
     """Safely classify common supported questions if model is unavailable."""
     text_val = question.casefold()
 
@@ -278,6 +325,23 @@ def fallback_intent(question: str, previous_intent: Intent | None = None) -> Int
     if dates:
         return Intent(operation="record", metric=metric, date=dates[0])
 
+    # Day range check without explicit month (e.g. "give me data 1 to 5", "1 to 5", "from 1 to 10", "1 se 5")
+    day_range_match = re.search(
+        r"\b(?:days?|tarikh|date)?\s*(?:from|between)?\s*(\d{1,2})\s*(?:st|nd|rd|th)?\s*(?:to|and|-|se|tak)\s*(\d{1,2})\s*(?:st|nd|rd|th)?\b",
+        text_val,
+    )
+    if day_range_match and not dates:
+        d1 = int(day_range_match.group(1))
+        d2 = int(day_range_match.group(2))
+        if 1 <= d1 <= 31 and 1 <= d2 <= 31 and d1 <= d2:
+            ctx_month = extract_context_month(text_val, previous_intent, recent_messages)
+            if ctx_month is not None:
+                start_d = f"{d1:02d}-{ctx_month:02d}-2025"
+                end_d = f"{d2:02d}-{ctx_month:02d}-2025"
+                return Intent(operation="range_records", metric=metric, start_date=start_d, end_date=end_d, month=ctx_month, year=2025)
+            else:
+                return Intent(operation="day_range", metric=metric, start_day=d1, end_day=d2, year=2025)
+
     month = next((number for name, number in MONTHS.items() if name in text_val), None)
     year_match = re.search(r"\b20\d{2}\b", text_val)
     year = int(year_match.group()) if year_match else None
@@ -321,7 +385,7 @@ async def generate_sql_or_chat(
         (category, content) where category is 'sql', 'chat', or 'out_of_scope'.
     """
     # Quick regex checks for immediate answers
-    local_intent = fallback_intent(question)
+    local_intent = fallback_intent(question, None, recent_messages)
     if local_intent and local_intent.operation == "mutation_refusal":
         return "mutation_refusal", MUTATION_REFUSAL_REPLY
     if local_intent and local_intent.operation == "chat":

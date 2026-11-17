@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Select, and_, func, select
+from sqlalchemy import Integer, Select, and_, func, select
 
 from backend.app.db import ExcavationRecord
 from backend.app.schemas import Intent
@@ -60,6 +60,12 @@ def build_query(intent: Intent) -> Select:
         return filtered(select(ExcavationRecord)).order_by(sortable_date)
     if intent.operation == "day_records":
         return filtered(select(ExcavationRecord)).order_by(sortable_date)
+    if intent.operation == "day_range":
+        s_day = intent.start_day or 1
+        e_day = intent.end_day or 31
+        day_expr = func.cast(func.substr(ExcavationRecord.date, 1, 2), Integer)
+        range_filter = and_(day_expr >= s_day, day_expr <= e_day)
+        return filtered(select(ExcavationRecord).where(range_filter)).order_by(sortable_date)
     if intent.operation == "highest":
         return filtered(select(ExcavationRecord)).order_by(ExcavationRecord.actual_volume.desc(), sortable_date).limit(1)
     if intent.operation == "group_by_support":

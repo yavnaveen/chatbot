@@ -56,12 +56,15 @@ class Intent(BaseModel):
         "difference",
         "highest",
         "day_records",
+        "day_range",
         "row_count",
         "mutation_refusal",
     ]
     metric: Literal["actual", "theoretical", "both"] | None = None
     date: str | None = None
     day: int | None = None
+    start_day: int | None = None
+    end_day: int | None = None
     start_date: str | None = None
     end_date: str | None = None
     month: int | None = None

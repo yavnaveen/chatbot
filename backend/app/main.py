@@ -164,6 +164,18 @@ def format_sql_result(query: str, columns: list[str], rows: list) -> tuple[str, 
         parts = [f"{col}: {_number(val) if isinstance(val, (int, float)) else val}" for col, val in row_dict.items()]
         return "; ".join(parts), table
 
+    if len(rows) > 1 and "date" in columns:
+        date_idx = columns.index("date")
+        months = {str(r[date_idx])[3:5] for r in rows if len(str(r[date_idx])) >= 5}
+        if len(months) > 1:
+            month_map = {"01": "January", "02": "February"}
+            m_labels = " & ".join(month_map.get(m, m) for m in sorted(list(months)))
+            return (
+                f"Found {len(rows)} record(s) matching your query across {m_labels}. "
+                f"(Tip: You can specify a month like '1 to 5 Feb' or '1 to 5 Jan' to filter).",
+                table,
+            )
+
     return f"Found {len(rows)} record(s) matching your query.", table
 
 
@@ -235,25 +247,27 @@ async def execute_chat(
             return finish(True, answer, intent=None, generated_query=None)
 
         # Step 2: Attempt zero-shot Text-to-SQL generation using qwen2.5-coder:7b
-        try:
-            category, content = await generate_sql_or_chat(question, history)
-            if category == "mutation_refusal":
-                return finish(True, MUTATION_REFUSAL_REPLY, table=None, intent=Intent(operation="mutation_refusal"), generated_query=None)
-            if category == "out_of_scope":
-                return finish(True, OUT_OF_SCOPE_REPLY, table=[], intent=Intent(operation="out_of_scope"), generated_query=None)
-            if category == "sql":
-                validate_safe_read_query(content)
-                res = session.execute(text(content))
-                cols = list(res.keys())
-                rows = res.fetchall()
-                answer, tbl = format_sql_result(content, cols, rows)
-                return finish(True, answer, table=tbl, intent=intent, generated_query=content)
-        except ValueError as exc:
-            if "Security violation" in str(exc):
-                return finish(True, MUTATION_REFUSAL_REPLY, table=None, intent=Intent(operation="mutation_refusal"), generated_query=None)
-            logging.info("Text-to-SQL pipeline triggered fallback: %s", exc)
-        except Exception as exc:
-            logging.info("Text-to-SQL pipeline triggered fallback: %s", exc)
+        # If intent already has verified specific date range parameters, execute verified query builder directly for 100% precision
+        if not (intent.operation == "range_records" and intent.start_date and intent.end_date):
+            try:
+                category, content = await generate_sql_or_chat(question, history)
+                if category == "mutation_refusal":
+                    return finish(True, MUTATION_REFUSAL_REPLY, table=None, intent=Intent(operation="mutation_refusal"), generated_query=None)
+                if category == "out_of_scope":
+                    return finish(True, OUT_OF_SCOPE_REPLY, table=[], intent=Intent(operation="out_of_scope"), generated_query=None)
+                if category == "sql":
+                    validate_safe_read_query(content)
+                    res = session.execute(text(content))
+                    cols = list(res.keys())
+                    rows = res.fetchall()
+                    answer, tbl = format_sql_result(content, cols, rows)
+                    return finish(True, answer, table=tbl, intent=intent, generated_query=content)
+            except ValueError as exc:
+                if "Security violation" in str(exc):
+                    return finish(True, MUTATION_REFUSAL_REPLY, table=None, intent=Intent(operation="mutation_refusal"), generated_query=None)
+                logging.info("Text-to-SQL pipeline triggered fallback: %s", exc)
+            except Exception as exc:
+                logging.info("Text-to-SQL pipeline triggered fallback: %s", exc)
 
         # Step 3: Verified query builder fallback pipeline
         try:
@@ -273,7 +287,7 @@ async def execute_chat(
                 count_val = rows[0][0]
                 return finish(True, f"The excavation database contains {_number(count_val)} records.", table=None, intent=intent, generated_query=compiled_sql)
 
-            if intent.operation in {"record", "range_records", "day_records"}:
+            if intent.operation in {"record", "range_records", "day_records", "day_range"}:
                 records = [row[0] for row in rows]
                 if not records:
                     return finish(True, "No excavation records matched that question.", intent=intent, generated_query=compiled_sql)
@@ -288,6 +302,27 @@ async def execute_chat(
                     answer = "; ".join(f"On {item.date}, pull was {_number(item.pull)} and support class was {item.support_class}." for item in records)
                     table = [["Date", "Pull", "Support Class"]]
                     table.extend([[item.date, _number(item.pull), item.support_class] for item in records])
+                    return finish(True, answer, table, intent, generated_query=compiled_sql)
+                if intent.operation == "day_range":
+                    month_map = {"01": "January", "02": "February"}
+                    months_present = sorted(list({rec.date[3:5] for rec in records}))
+                    m_names = " & ".join(month_map.get(m, m) for m in months_present)
+                    answer = (
+                        f"Found {len(records)} excavation record(s) for days {intent.start_day} to {intent.end_day} "
+                        f"across all available months ({m_names}). "
+                        f"(Tip: Specify a month like '1 to 5 Feb' or '1 to 5 Jan' to filter)."
+                    )
+                    table = [["Date", "Pull", "Support Class", "Theoretical", "Actual"]]
+                    table.extend([
+                        [
+                            item.date,
+                            _number(item.pull),
+                            item.support_class,
+                            _number(item.theoretical_volume),
+                            _number(item.actual_volume),
+                        ]
+                        for item in records
+                    ])
                     return finish(True, answer, table, intent, generated_query=compiled_sql)
                 if len(records) == 1:
                     answer = record_answer(records[0], intent.metric)

@@ -342,3 +342,33 @@ def test_upload_csv_data_and_audit():
     assert "/api/upload" in content
 
 
+def test_ambiguous_day_range_does_not_blind_limit():
+    with get_test_client() as client:
+        res = client.post("/chat", json={"message": "give me data 1 to 5"})
+    assert res.status_code == 200
+    data = res.json()
+    assert data["status"] == "success"
+    # Should NOT have LIMIT 5, should cover days 1 to 5 across months (10 rows + 1 header)
+    assert len(data.get("table", [])) >= 10
+    assert "LIMIT 5" not in (data.get("generated_query") or "")
+
+
+def test_context_aware_month_resolution():
+    with get_test_client() as client:
+        # Turn 1: Discuss February
+        r1 = client.post("/api/chat", json={"question": "What was total excavation in February?"})
+        assert r1.status_code == 200
+        cid = r1.json()["conversation_id"]
+
+        # Turn 2: Follow-up asking 1 to 5
+        r2 = client.post("/api/chat", json={"question": "give me data 1 to 5", "conversation_id": cid})
+        assert r2.status_code == 200
+        data2 = r2.json()
+        assert data2["success"] is True
+        # Must resolve to February 1 to 5 (5 rows + header)
+        dates = [row[0] for row in data2.get("table", [])[1:]]
+        assert len(dates) == 5
+        assert all("02-2025" in d for d in dates)
+
+
+
