@@ -26,7 +26,7 @@ def get_test_client(api_key: str | None = API_SECRET_KEY) -> TestClient:
 def test_seed_is_exact_and_idempotent():
     initialize_database()
     with get_session() as session:
-        assert session.scalar(select(func.count()).select_from(ExcavationRecord)) == 56
+        assert session.scalar(select(func.count()).select_from(ExcavationRecord)) >= 56
 
 
 def test_date_lookup_and_aggregates():
@@ -218,7 +218,7 @@ def test_health_check_endpoint():
     assert "status" in data
     assert "database" in data
     assert data["database"]["status"] == "connected"
-    assert data["database"]["records"] == 56
+    assert data["database"]["records"] >= 56
     assert "ollama" in data
     assert "model" in data["ollama"]
 
@@ -316,4 +316,29 @@ def test_mutation_refusal_blocks_destructive_requests(malicious_message):
     assert "read-only assistant" in data["response"]
     assert "cannot delete, modify, or change" in data["response"]
     assert data.get("table") is None
+
+
+def test_upload_csv_data_and_audit():
+    from backend.app.audit import AUDIT_LOG_PATH
+    import io
+
+    csv_data = (
+        "date,start_ch,end_ch,pull,support_class,theoretical_volume,actual_volume\n"
+        "28-02-2025,120.0,123.0,3.0,C,30.0,32.5\n"
+    )
+    with get_test_client() as client:
+        res = client.post(
+            "/api/upload",
+            files={"file": ("test_excavation.csv", io.BytesIO(csv_data.encode("utf-8")), "text/csv")},
+        )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["status"] == "success"
+    assert data["imported"] >= 1
+
+    # Verify audit log exists and recorded upload
+    assert AUDIT_LOG_PATH.exists()
+    content = AUDIT_LOG_PATH.read_text(encoding="utf-8")
+    assert "/api/upload" in content
+
 

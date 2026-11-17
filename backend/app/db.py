@@ -62,6 +62,7 @@ class Message(Base):
     role: Mapped[str] = mapped_column(String(10), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     rows_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    generated_query: Mapped[str | None] = mapped_column(Text, nullable=True)
     intent_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now)
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
@@ -70,6 +71,18 @@ class Message(Base):
 def initialize_database() -> None:
     DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
     Base.metadata.create_all(engine)
+
+    # Automatic non-destructive migration for generated_query
+    try:
+        with engine.connect() as conn:
+            from sqlalchemy import text
+            cols = [row[1] for row in conn.execute(text("PRAGMA table_info(messages)")).fetchall()]
+            if cols and "generated_query" not in cols:
+                conn.execute(text("ALTER TABLE messages ADD COLUMN generated_query TEXT"))
+                conn.commit()
+    except Exception:
+        pass
+
     with SessionLocal.begin() as session:
         count = session.scalar(select(func.count()).select_from(ExcavationRecord)) or 0
         if count == 0:
@@ -87,15 +100,15 @@ def initialize_database() -> None:
                     for date, start_ch, end_ch, pull, support_class, theoretical, actual in SEED_RECORDS
                 ]
             )
-        elif count != len(SEED_RECORDS):
+        elif count < len(SEED_RECORDS):
             raise RuntimeError(
-                f"Database integrity check failed: expected {len(SEED_RECORDS)} records, found {count}."
+                f"Database integrity check failed: expected at least {len(SEED_RECORDS)} records, found {count}."
             )
 
     with SessionLocal() as session:
         final_count = session.scalar(select(func.count()).select_from(ExcavationRecord)) or 0
-        if final_count != len(SEED_RECORDS):
-            raise RuntimeError(f"Database seeding failed: expected 56 records, found {final_count}.")
+        if final_count < len(SEED_RECORDS):
+            raise RuntimeError(f"Database seeding failed: expected at least 56 records, found {final_count}.")
 
 
 def get_session() -> Session:

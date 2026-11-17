@@ -1,11 +1,13 @@
 from contextlib import asynccontextmanager
 import logging
+import time
 from typing import Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import Select, func, select, text
 
+from backend.app.audit import log_audit_event
 from backend.app.config import CORS_ORIGINS, OLLAMA_MODEL
 from backend.app.conversation_service import (
     add_message,
@@ -19,6 +21,7 @@ from backend.app.conversation_service import (
 )
 from backend.app.db import Conversation, ExcavationRecord, get_session, initialize_database
 from backend.app.formatters import _number, record_answer
+from backend.app.importer import import_excavation_data
 from backend.app.ollama import (
     MUTATION_REFUSAL_REPLY,
     OUT_OF_SCOPE_REPLY,
@@ -122,7 +125,7 @@ async def api_health() -> dict[str, object]:
         count = session.scalar(select(func.count()).select_from(ExcavationRecord)) or 0
     ollama_info = await check_ollama_health()
     return {
-        "ok": count == 56,
+        "ok": count >= 56,
         "records": count,
         "ollama_reachable": ollama_info.get("reachable", False),
         "model_available": ollama_info.get("model_available", False),
@@ -167,8 +170,10 @@ def format_sql_result(query: str, columns: list[str], rows: list) -> tuple[str, 
 async def execute_chat(
     question: str,
     conversation_id: Optional[int] = None,
+    client_ip: str = "unknown",
 ) -> tuple[bool, str, list[list[str]] | None, int, str | None]:
     """Core excavation chatbot reasoning pipeline with conversation memory and Text-to-SQL."""
+    start_time = time.perf_counter()
     with get_session() as session:
         conversation = get_conversation(session, conversation_id) if conversation_id else None
         if conversation_id and conversation is None:
@@ -189,7 +194,26 @@ async def execute_chat(
             intent: Intent | None = None,
             generated_query: str | None = None,
         ) -> tuple[bool, str, list[list[str]] | None, int, str | None]:
-            add_message(session, conversation, "assistant", answer, rows=table, intent=intent)
+            add_message(
+                session,
+                conversation,
+                "assistant",
+                answer,
+                rows=table,
+                intent=intent,
+                generated_query=generated_query,
+            )
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            is_violation = intent is not None and intent.operation == "mutation_refusal"
+            log_audit_event(
+                client_ip=client_ip,
+                endpoint="/chat",
+                question=question,
+                generated_query=generated_query,
+                response_time_ms=elapsed_ms,
+                status="success" if success else "error",
+                violation_flag=is_violation,
+            )
             return success, answer, table, conversation.id, generated_query
 
         # Step 1: Classify intent or handle conversational / out-of-scope / mutation queries
@@ -325,11 +349,13 @@ async def execute_chat(
     dependencies=[Depends(verify_api_key), Depends(rate_limit_dependency)],
     tags=["Chat"],
 )
-async def public_chat(request: PublicChatRequest) -> PublicChatResponse:
+async def public_chat(payload: PublicChatRequest, request: Request) -> PublicChatResponse:
     """Public chat endpoint accepting JSON {"message": "user question"} and returning {"response": "formatted answer", "generated_query": "...", "status": "success"}."""
+    client_ip = request.headers.get("CF-Connecting-IP") or (request.client.host if request.client else "unknown")
     success, answer, table, conversation_id, generated_query = await execute_chat(
-        question=request.query_text,
-        conversation_id=request.conversation_id,
+        question=payload.query_text,
+        conversation_id=payload.conversation_id,
+        client_ip=client_ip,
     )
     return PublicChatResponse(
         response=answer,
@@ -347,11 +373,13 @@ async def public_chat(request: PublicChatRequest) -> PublicChatResponse:
     dependencies=[Depends(verify_api_key), Depends(rate_limit_dependency)],
     tags=["Chat"],
 )
-async def api_chat_with_memory(request: ChatRequest) -> ChatResponse:
+async def api_chat_with_memory(payload: ChatRequest, request: Request) -> ChatResponse:
     """Internal / frontend chat endpoint with conversation memory."""
+    client_ip = request.headers.get("CF-Connecting-IP") or (request.client.host if request.client else "unknown")
     success, answer, table, conversation_id, generated_query = await execute_chat(
-        question=request.question,
-        conversation_id=request.conversation_id,
+        question=payload.question,
+        conversation_id=payload.conversation_id,
+        client_ip=client_ip,
     )
     return ChatResponse(
         success=success,
@@ -360,6 +388,59 @@ async def api_chat_with_memory(request: ChatRequest) -> ChatResponse:
         conversation_id=conversation_id,
         generated_query=generated_query,
     )
+
+
+@app.post(
+    "/api/upload",
+    dependencies=[Depends(verify_api_key), Depends(rate_limit_dependency)],
+    tags=["Data"],
+)
+@app.post(
+    "/upload",
+    dependencies=[Depends(verify_api_key), Depends(rate_limit_dependency)],
+    tags=["Data"],
+)
+async def upload_excavation_data(
+    request: Request,
+    file: UploadFile = File(...),
+) -> dict[str, object]:
+    """Upload CSV or Excel (.xlsx) file containing excavation records to update or insert into the database."""
+    start_time = time.perf_counter()
+    client_ip = request.headers.get("CF-Connecting-IP") or (request.client.host if request.client else "unknown")
+    filename = file.filename or "unknown.csv"
+
+    if not filename.lower().endswith((".csv", ".xlsx", ".xls")):
+        raise HTTPException(status_code=400, detail="Only .csv and .xlsx files are supported.")
+
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    try:
+        with get_session() as session:
+            result = import_excavation_data(file_bytes, filename, session)
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            log_audit_event(
+                client_ip=client_ip,
+                endpoint="/api/upload",
+                question=f"Uploaded file: {filename}",
+                response_time_ms=elapsed_ms,
+                status="success",
+                metadata={"filename": filename, "imported": result["imported"], "total": result["total_records"]},
+            )
+            return result
+    except Exception as exc:
+        elapsed_ms = (time.perf_counter() - start_time) * 1000
+        log_audit_event(
+            client_ip=client_ip,
+            endpoint="/api/upload",
+            question=f"Uploaded file: {filename}",
+            response_time_ms=elapsed_ms,
+            status="error",
+            violation_flag=False,
+            metadata={"error": str(exc)},
+        )
+        raise HTTPException(status_code=400, detail=f"Failed to process file: {exc}")
 
 
 @app.post("/api/conversations", dependencies=[Depends(verify_api_key)], tags=["Conversations"])

@@ -66,6 +66,7 @@ def add_message(
     content: str,
     rows: list[list[str]] | None = None,
     intent: Intent | None = None,
+    generated_query: str | None = None,
 ) -> Message:
     message = Message(
         conversation_id=conversation.id,
@@ -73,6 +74,7 @@ def add_message(
         content=content,
         rows_json=json.dumps(rows, ensure_ascii=False) if rows is not None else None,
         intent_json=intent.model_dump_json() if intent and intent.operation != "chat" else None,
+        generated_query=generated_query,
         created_at=utc_now(),
     )
     session.add(message)
@@ -94,5 +96,6 @@ def message_payload(message: Message) -> dict[str, object]:
         "role": message.role,
         "content": message.content,
         "rows": rows,
+        "generated_query": getattr(message, "generated_query", None),
         "created_at": message.created_at.isoformat(),
     }
