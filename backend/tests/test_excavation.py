@@ -351,7 +351,7 @@ def test_ambiguous_day_range_in_new_conversation_asks_clarification():
         assert data["success"] is True
         assert data.get("table") is None
         assert data.get("generated_query") is None
-        assert "Kaunse month" in data["answer"] or "January" in data["answer"]
+        assert "Which month" in data["answer"] or "January" in data["answer"]
         cid = data["conversation_id"]
 
         # Reply "2" -> Feb 1-5

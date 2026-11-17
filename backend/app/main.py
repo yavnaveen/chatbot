@@ -407,12 +407,12 @@ async def execute_chat(
                     # Otherwise, NO month in context, NO month in query:
                     # do NOT run any query. Reply asking: which month (January / February / Both), or do they want first N rows.
                     clarification_msg = (
-                        f"Kaunse month ka {d1} to {d2} data chahiye?\n\n"
+                        f"Which month of excavation data would you like for days {d1} to {d2}?\n\n"
                         f"1. January ({d1:02d}-01-2025 to {d2:02d}-01-2025)\n"
                         f"2. February ({d1:02d}-02-2025 to {d2:02d}-02-2025)\n"
-                        f"3. Both Months (January & February dono)\n"
-                        f"4. First {d2} rows (Table ke pehle {d2} records by ID)\n\n"
-                        f"Kripya option number (1, 2, 3, 4) ya month name (Jan / Feb / Both / First {d2} rows) batayein."
+                        f"3. Both Months (January & February combined)\n"
+                        f"4. First {d2} rows (First {d2} records by ID)\n\n"
+                        f"Please specify an option (1, 2, 3, 4) or month name (Jan / Feb / Both / First {d2} rows)."
                     )
                     pending_intent = Intent(
                         operation="pending_clarification",
