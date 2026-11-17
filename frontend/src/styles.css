@@ -200,8 +200,11 @@ tr:nth-child(even) td {
 }
 
 .conversation-list {
-  display: grid;
-  gap: 4px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  align-items: stretch;
+  gap: 6px;
   flex: 1;
   overflow-y: auto;
 }

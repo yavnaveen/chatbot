@@ -53,4 +53,5 @@ def clean_conversation_memory():
 
 if __name__ == "__main__":
     clean_caches()
-    clean_conversation_memory()
+    if "--reset-chats" in sys.argv or "--clear-db" in sys.argv:
+        clean_conversation_memory()

@@ -19,11 +19,11 @@ for /f "tokens=5" %%a in ('netstat -aon ^| findstr :5173 ^| findstr LISTENING 2^
 powershell -Command "Get-NetTCPConnection -LocalPort 8000,5173 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }" > nul 2>&1
 echo       [OK] Previous process memory freed.
 
-:: 2. Clear cache files (__pycache__, .pytest_cache, vite cache) and previous conversation memory
+:: 2. Clear cache files (__pycache__, .pytest_cache, vite cache)
 echo.
-echo [2/4] Clearing cache files and previous chat conversation memory...
+echo [2/4] Clearing cache files (__pycache__, vite build cache)...
 python backend/clean.py
-echo       [OK] Cache files and past conversation memory cleaned.
+echo       [OK] Cache files cleaned.
 
 :: 3. Check & start Ollama if not running
 echo.
