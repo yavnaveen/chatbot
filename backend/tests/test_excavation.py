@@ -342,15 +342,65 @@ def test_upload_csv_data_and_audit():
     assert "/api/upload" in content
 
 
-def test_ambiguous_day_range_does_not_blind_limit():
+def test_ambiguous_day_range_in_new_conversation_asks_clarification():
     with get_test_client() as client:
-        res = client.post("/chat", json={"message": "give me data 1 to 5"})
-    assert res.status_code == 200
-    data = res.json()
-    assert data["status"] == "success"
-    # Should NOT have LIMIT 5, should cover days 1 to 5 across months (10 rows + 1 header)
-    assert len(data.get("table", [])) >= 10
-    assert "LIMIT 5" not in (data.get("generated_query") or "")
+        # "give me data 1 to5" in a new conversation -> clarification, NO DB query
+        res = client.post("/api/chat", json={"question": "give me data 1 to5"})
+        assert res.status_code == 200
+        data = res.json()
+        assert data["success"] is True
+        assert data.get("table") is None
+        assert data.get("generated_query") is None
+        assert "Kaunse month" in data["answer"] or "January" in data["answer"]
+        cid = data["conversation_id"]
+
+        # Reply "2" -> Feb 1-5
+        res2 = client.post("/api/chat", json={"question": "2", "conversation_id": cid})
+        assert res2.status_code == 200
+        data2 = res2.json()
+        assert data2["success"] is True
+        assert data2.get("table") is not None
+        rows2 = data2["table"][1:]
+        assert len(rows2) == 5
+        dates2 = [r[0] for r in rows2]
+        assert dates2 == ["01-02-2025", "02-02-2025", "03-02-2025", "04-02-2025", "05-02-2025"]
+
+
+def test_ambiguous_day_range_reply_first_5_rows():
+    with get_test_client() as client:
+        # Step 1: Ambiguous prompt -> clarification, no DB query
+        res = client.post("/api/chat", json={"question": "give me data 1-5"})
+        assert res.status_code == 200
+        data = res.json()
+        assert data.get("table") is None
+        assert data.get("generated_query") is None
+        cid = data["conversation_id"]
+
+        # Step 2: Reply "first 5 rows" -> ids 1-5
+        res2 = client.post("/api/chat", json={"question": "first 5 rows", "conversation_id": cid})
+        assert res2.status_code == 200
+        data2 = res2.json()
+        assert data2["success"] is True
+        assert data2.get("table") is not None
+        rows2 = data2["table"][1:]
+        assert len(rows2) == 5
+        ids = [int(r[0]) for r in rows2]
+        assert ids == [1, 2, 3, 4, 5]
+
+
+def test_day_range_with_explicit_month_direct_answer():
+    with get_test_client() as client:
+        # "give me data 1 to 5 january" -> direct answer without clarification
+        res = client.post("/api/chat", json={"question": "give me data 1 to 5 january"})
+        assert res.status_code == 200
+        data = res.json()
+        assert data["success"] is True
+        assert data.get("table") is not None
+        assert data.get("generated_query") is not None
+        rows = data["table"][1:]
+        assert len(rows) == 5
+        dates = [r[0] for r in rows]
+        assert dates == ["01-01-2025", "02-01-2025", "03-01-2025", "04-01-2025", "05-01-2025"]
 
 
 def test_context_aware_month_resolution():
@@ -360,15 +410,16 @@ def test_context_aware_month_resolution():
         assert r1.status_code == 200
         cid = r1.json()["conversation_id"]
 
-        # Turn 2: Follow-up asking 1 to 5
+        # Turn 2: Follow-up asking 1 to 5 -> reuses February and adds note
         r2 = client.post("/api/chat", json={"question": "give me data 1 to 5", "conversation_id": cid})
         assert r2.status_code == 200
         data2 = r2.json()
         assert data2["success"] is True
-        # Must resolve to February 1 to 5 (5 rows + header)
+        assert "Showing 1 to 5 February 2025 (based on your previous question)." in data2["answer"]
         dates = [row[0] for row in data2.get("table", [])[1:]]
         assert len(dates) == 5
         assert all("02-2025" in d for d in dates)
+
 
 
 

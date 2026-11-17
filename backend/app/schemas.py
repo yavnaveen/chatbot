@@ -59,6 +59,7 @@ class Intent(BaseModel):
         "day_range",
         "row_count",
         "mutation_refusal",
+        "pending_clarification",
     ]
     metric: Literal["actual", "theoretical", "both"] | None = None
     date: str | None = None

@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 import logging
+import re
 import time
 from typing import Optional
 
@@ -228,6 +229,199 @@ async def execute_chat(
                 violation_flag=is_violation,
             )
             return success, answer, table, conversation.id, generated_query
+
+        # Pre-check 1: Resolve pending clarification from previous turn
+        if previous_intent and previous_intent.operation == "pending_clarification":
+            ans_clean = question.strip().lower()
+            d1 = previous_intent.start_day or 1
+            d2 = previous_intent.end_day or 5
+
+            # Match option 1 (January)
+            if (
+                ans_clean in {"1", "jan", "january", "1.", "option 1"}
+                or re.search(r"\b(?:jan|january)\b", ans_clean)
+                or ans_clean.startswith("1")
+            ) and not any(w in ans_clean for w in ("row", "record", "id", "first", "pehle")):
+                start_date = f"{d1:02d}-01-2025"
+                end_date = f"{d2:02d}-01-2025"
+                resolved_intent = Intent(
+                    operation="range_records",
+                    metric="both",
+                    start_date=start_date,
+                    end_date=end_date,
+                    month=1,
+                    year=2025,
+                )
+                statement = build_query(resolved_intent)
+                compiled_sql = str(statement.compile(compile_kwargs={"literal_binds": True}))
+                records = [r[0] for r in session.execute(statement).all()]
+                table = [["Date", "Pull", "Support Class", "Theoretical", "Actual"]]
+                table.extend([[r.date, _number(r.pull), r.support_class, _number(r.theoretical_volume), _number(r.actual_volume)] for r in records])
+                return finish(True, f"Showing {d1} to {d2} January 2025:", table, resolved_intent, compiled_sql)
+
+            # Match option 2 (February)
+            if (
+                ans_clean in {"2", "feb", "february", "2.", "option 2"}
+                or re.search(r"\b(?:feb|february)\b", ans_clean)
+                or ans_clean.startswith("2")
+            ):
+                start_date = f"{d1:02d}-02-2025"
+                end_date = f"{d2:02d}-02-2025"
+                resolved_intent = Intent(
+                    operation="range_records",
+                    metric="both",
+                    start_date=start_date,
+                    end_date=end_date,
+                    month=2,
+                    year=2025,
+                )
+                statement = build_query(resolved_intent)
+                compiled_sql = str(statement.compile(compile_kwargs={"literal_binds": True}))
+                records = [r[0] for r in session.execute(statement).all()]
+                table = [["Date", "Pull", "Support Class", "Theoretical", "Actual"]]
+                table.extend([[r.date, _number(r.pull), r.support_class, _number(r.theoretical_volume), _number(r.actual_volume)] for r in records])
+                return finish(True, f"Showing {d1} to {d2} February 2025:", table, resolved_intent, compiled_sql)
+
+            # Match option 3 (Both Months / dono)
+            if (
+                ans_clean in {"3", "both", "dono", "all", "3.", "option 3"}
+                or "both" in ans_clean
+                or "dono" in ans_clean
+                or ans_clean.startswith("3")
+            ):
+                resolved_intent = Intent(
+                    operation="day_range",
+                    metric="both",
+                    start_day=d1,
+                    end_day=d2,
+                    year=2025,
+                )
+                statement = build_query(resolved_intent)
+                compiled_sql = str(statement.compile(compile_kwargs={"literal_binds": True}))
+                records = [r[0] for r in session.execute(statement).all()]
+                table = [["Date", "Pull", "Support Class", "Theoretical", "Actual"]]
+                table.extend([[r.date, _number(r.pull), r.support_class, _number(r.theoretical_volume), _number(r.actual_volume)] for r in records])
+                return finish(True, f"Showing days {d1} to {d2} across January & February 2025:", table, resolved_intent, compiled_sql)
+
+            # Match option 4 / "first 5 rows" / row / record / id
+            if (
+                ans_clean in {"4", "4.", "option 4"}
+                or any(w in ans_clean for w in ("first", "top", "row", "record", "id", "pehle", "pehli"))
+            ):
+                stmt = select(ExcavationRecord).where(ExcavationRecord.id.between(d1, d2)).order_by(ExcavationRecord.id.asc())
+                compiled_sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+                records = [r[0] for r in session.execute(stmt).all()]
+                table = [["ID", "Date", "Pull", "Support Class", "Theoretical", "Actual"]]
+                table.extend([[str(r.id), r.date, _number(r.pull), r.support_class, _number(r.theoretical_volume), _number(r.actual_volume)] for r in records])
+                resolved_intent = Intent(operation="range_records", metric="both", start_day=d1, end_day=d2)
+                return finish(True, f"Showing first {len(records)} record(s) by ID (ID {d1} to {d2}):", table, resolved_intent, compiled_sql)
+
+        # Pre-check 2: Ambiguous day range pre-check BEFORE classify_question
+        range_match = re.search(
+            r"(?<!\d)(\d{1,2})\s*(?:to|-|se|tak|and)\s*(\d{1,2})(?!\d)",
+            question,
+            re.IGNORECASE,
+        )
+        if range_match:
+            d1 = int(range_match.group(1))
+            d2 = int(range_match.group(2))
+            if 1 <= d1 <= 31 and 1 <= d2 <= 31 and d1 <= d2:
+                q_lower = question.lower()
+                month_names = (
+                    "january", "jan", "february", "feb", "march", "mar", "april", "apr",
+                    "may", "june", "jun", "july", "jul", "august", "aug", "september", "sep",
+                    "october", "oct", "november", "nov", "december", "dec"
+                )
+                has_month_name = any(re.search(rf"\b{m}\b", q_lower) for m in month_names)
+                has_full_date = bool(extract_dates_from_text(question))
+                has_row_words = any(
+                    re.search(rf"\b{w}\b", q_lower)
+                    for w in ("row", "rows", "record", "records", "id", "ids", "first", "top", "pehle", "pehli", "limit")
+                )
+
+                # If there's an explicit month name in question (e.g. "give me data 1 to 5 january")
+                if has_month_name and not has_row_words:
+                    month_num = 1 if re.search(r"\b(?:jan|january)\b", q_lower) else 2
+                    m_label = "January" if month_num == 1 else "February"
+                    start_date = f"{d1:02d}-{month_num:02d}-2025"
+                    end_date = f"{d2:02d}-{month_num:02d}-2025"
+                    direct_intent = Intent(
+                        operation="range_records",
+                        metric="both",
+                        start_date=start_date,
+                        end_date=end_date,
+                        month=month_num,
+                        year=2025,
+                    )
+                    statement = build_query(direct_intent)
+                    compiled_sql = str(statement.compile(compile_kwargs={"literal_binds": True}))
+                    records = [r[0] for r in session.execute(statement).all()]
+                    table = [["Date", "Pull", "Support Class", "Theoretical", "Actual"]]
+                    table.extend([[r.date, _number(r.pull), r.support_class, _number(r.theoretical_volume), _number(r.actual_volume)] for r in records])
+                    return finish(True, f"Showing {d1} to {d2} {m_label} 2025:", table, direct_intent, compiled_sql)
+
+                # If no month name, no full date, no row/record/id/first/top words:
+                if not has_month_name and not has_full_date and not has_row_words:
+                    # Check if conversation has a previous data intent with a month or date
+                    prev_month = None
+                    prev_year = 2025
+                    if previous_intent and previous_intent.operation != "pending_clarification":
+                        if previous_intent.month:
+                            prev_month = previous_intent.month
+                            prev_year = previous_intent.year or 2025
+                        elif previous_intent.date and len(previous_intent.date) >= 10:
+                            try:
+                                prev_month = int(previous_intent.date[3:5])
+                                prev_year = int(previous_intent.date[6:10])
+                            except ValueError:
+                                pass
+                        elif previous_intent.start_date and len(previous_intent.start_date) >= 10:
+                            try:
+                                prev_month = int(previous_intent.start_date[3:5])
+                                prev_year = int(previous_intent.start_date[6:10])
+                            except ValueError:
+                                pass
+
+                    if prev_month is not None:
+                        # Reuse previous month and add the note:
+                        # "Showing 1 to 5 <Month> <Year> (based on your previous question)."
+                        m_label = {1: "January", 2: "February"}.get(prev_month, f"Month {prev_month}")
+                        start_date = f"{d1:02d}-{prev_month:02d}-{prev_year}"
+                        end_date = f"{d2:02d}-{prev_month:02d}-{prev_year}"
+                        reused_intent = Intent(
+                            operation="range_records",
+                            metric="both",
+                            start_date=start_date,
+                            end_date=end_date,
+                            month=prev_month,
+                            year=prev_year,
+                        )
+                        statement = build_query(reused_intent)
+                        compiled_sql = str(statement.compile(compile_kwargs={"literal_binds": True}))
+                        records = [r[0] for r in session.execute(statement).all()]
+                        table = [["Date", "Pull", "Support Class", "Theoretical", "Actual"]]
+                        table.extend([[r.date, _number(r.pull), r.support_class, _number(r.theoretical_volume), _number(r.actual_volume)] for r in records])
+                        note = f"Showing {d1} to {d2} {m_label} {prev_year} (based on your previous question)."
+                        return finish(True, note, table, reused_intent, compiled_sql)
+
+                    # Otherwise, NO month in context, NO month in query:
+                    # do NOT run any query. Reply asking: which month (January / February / Both), or do they want first N rows.
+                    clarification_msg = (
+                        f"Kaunse month ka {d1} to {d2} data chahiye?\n\n"
+                        f"1. January ({d1:02d}-01-2025 to {d2:02d}-01-2025)\n"
+                        f"2. February ({d1:02d}-02-2025 to {d2:02d}-02-2025)\n"
+                        f"3. Both Months (January & February dono)\n"
+                        f"4. First {d2} rows (Table ke pehle {d2} records by ID)\n\n"
+                        f"Kripya option number (1, 2, 3, 4) ya month name (Jan / Feb / Both / First {d2} rows) batayein."
+                    )
+                    pending_intent = Intent(
+                        operation="pending_clarification",
+                        start_day=d1,
+                        end_day=d2,
+                    )
+                    user_message.intent_json = pending_intent.model_dump_json()
+                    session.commit()
+                    return finish(True, clarification_msg, table=None, intent=pending_intent, generated_query=None)
 
         # Step 1: Classify intent or handle conversational / out-of-scope / mutation queries
         try:
