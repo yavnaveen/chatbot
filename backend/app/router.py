@@ -24,12 +24,12 @@ GREETING_REPLY = (
 )
 
 OUT_OF_SCOPE_REPLY = (
-    "Sorry, main sirf tunnel excavation se related sawalon me madad kar sakta hu. "
-    "Aap pooch sakte ho: '01-01-2025 ko actual excavation kitna tha?' ya 'Support class A me total excavation kitna hai?'"
+    "Sorry, I can only answer questions related to the tunnel excavation database. "
+    "You can ask: 'What was the actual excavation on 01-01-2025?' or 'What is the total excavation for support class A?'"
 )
 
 MONTH_CLARIFICATION_REPLY = (
-    "Kaunsa month? (1) January (2) February (3) Dono, ya table ke pehle 5 rows chahiye?"
+    "Which month do you mean? (1) January (2) February (3) Both months, or do you want the first 5 rows of the table?"
 )
 
 
