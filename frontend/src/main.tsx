@@ -49,10 +49,25 @@ function exportToCsv(rows: string[][], filename = `excavation_data_${Date.now()}
   URL.revokeObjectURL(url)
 }
 
+function toSortableDate(d: string): string {
+  const match = d.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/)
+  if (match) return `${match[3]}-${match[2].padStart(2, '0')}-${match[1].padStart(2, '0')}`
+  return d
+}
+
+function formatLabel(val: string): string {
+  const match = val.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/)
+  if (match) {
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+    const mIdx = parseInt(match[2], 10) - 1
+    return `${match[1]} ${months[mIdx] || match[2]}`
+  }
+  return val
+}
+
 function SvgChart({ rows }: { rows: string[][] }) {
   if (!rows || rows.length < 2) return null
   const headers = rows[0]
-  const data = rows.slice(1, 15) // display up to 14 entries for optimal layout
 
   let labelIdx = headers.findIndex((h) => /date|tarikh|class|support/i.test(h))
   if (labelIdx === -1) labelIdx = 0
@@ -60,41 +75,79 @@ function SvgChart({ rows }: { rows: string[][] }) {
   let actualIdx = headers.findIndex((h) => /actual/i.test(h))
   let theoIdx = headers.findIndex((h) => /theo/i.test(h))
   if (actualIdx === -1 && theoIdx === -1) {
-    actualIdx = headers.findIndex((_, idx) => idx !== labelIdx && !isNaN(Number(data[0]?.[idx])))
+    actualIdx = headers.findIndex((_, idx) => idx !== labelIdx && !isNaN(Number(rows[1]?.[idx])))
   }
 
-  const items = data.map((r) => ({
-    label: String(r[labelIdx] ?? '').slice(0, 10),
+  // Sort rows chronologically if label is date
+  const isDateColumn = /date|tarikh/i.test(headers[labelIdx])
+  const sortedRaw = [...rows.slice(1)].sort((a, b) => {
+    if (isDateColumn) {
+      return toSortableDate(a[labelIdx] ?? '').localeCompare(toSortableDate(b[labelIdx] ?? ''))
+    }
+    return 0
+  })
+
+  const [rangeMode, setRangeMode] = useState<'first14' | 'latest14' | 'all'>('first14')
+
+  const displayedRows =
+    rangeMode === 'latest14'
+      ? sortedRaw.slice(-14)
+      : rangeMode === 'first14'
+      ? sortedRaw.slice(0, 14)
+      : sortedRaw
+
+  const items = displayedRows.map((r) => ({
+    fullLabel: String(r[labelIdx] ?? ''),
+    displayLabel: formatLabel(String(r[labelIdx] ?? '')),
     actual: actualIdx !== -1 ? Math.max(0, parseFloat(r[actualIdx]) || 0) : 0,
     theo: theoIdx !== -1 ? Math.max(0, parseFloat(r[theoIdx]) || 0) : 0,
   }))
 
   const maxVal = Math.max(1, ...items.map((i) => Math.max(i.actual, i.theo)))
-  const chartHeight = 160
-  const barWidth = items.length > 8 ? 14 : 22
-  const groupGap = items.length > 8 ? 20 : 36
-  const chartWidth = Math.max(340, items.length * (barWidth * 2 + groupGap) + 50)
+  const chartHeight = 180
+  const barWidth = items.length > 25 ? 12 : items.length > 15 ? 16 : 22
+  const groupGap = items.length > 25 ? 14 : items.length > 15 ? 20 : 32
+  const slotWidth = barWidth * 2 + groupGap
+  const chartWidth = Math.max(480, items.length * slotWidth + 60)
 
   return (
     <div className="chart-wrapper">
-      <div className="chart-legend">
-        {actualIdx !== -1 && <span className="legend-item"><span className="legend-box actual" /> Actual</span>}
-        {theoIdx !== -1 && <span className="legend-item"><span className="legend-box theo" /> Theoretical</span>}
+      <div className="chart-header-bar">
+        <div className="chart-legend">
+          {actualIdx !== -1 && <span className="legend-item"><span className="legend-box actual" /> Actual (m³)</span>}
+          {theoIdx !== -1 && <span className="legend-item"><span className="legend-box theo" /> Theoretical (m³)</span>}
+        </div>
+        {sortedRaw.length > 14 && (
+          <div className="chart-range-picker">
+            <button className={`range-tab ${rangeMode === 'first14' ? 'active' : ''}`} onClick={() => setRangeMode('first14')}>
+              First 14
+            </button>
+            <button className={`range-tab ${rangeMode === 'latest14' ? 'active' : ''}`} onClick={() => setRangeMode('latest14')}>
+              Latest 14
+            </button>
+            <button className={`range-tab ${rangeMode === 'all' ? 'active' : ''}`} onClick={() => setRangeMode('all')}>
+              All ({sortedRaw.length})
+            </button>
+          </div>
+        )}
       </div>
+
       <div className="chart-scroll">
-        <svg viewBox={`0 0 ${chartWidth} ${chartHeight + 45}`} className="chart-svg" style={{ minWidth: chartWidth }}>
-          <line x1="20" y1={chartHeight} x2={chartWidth} y2={chartHeight} stroke="#cbd5e1" strokeWidth="1" />
+        <svg viewBox={`0 0 ${chartWidth} ${chartHeight + 55}`} className="chart-svg" style={{ minWidth: chartWidth, width: rangeMode === 'all' ? chartWidth : '100%' }}>
+          {/* Baseline grid */}
+          <line x1="15" y1={chartHeight} x2={chartWidth - 10} y2={chartHeight} stroke="#cbd5e1" strokeWidth="1.5" />
+
           {items.map((item, i) => {
-            const x = 30 + i * (barWidth * 2 + groupGap)
-            const hActual = (item.actual / maxVal) * (chartHeight - 30)
-            const hTheo = (item.theo / maxVal) * (chartHeight - 30)
+            const x = 30 + i * slotWidth
+            const hActual = (item.actual / maxVal) * (chartHeight - 40)
+            const hTheo = (item.theo / maxVal) * (chartHeight - 40)
             return (
               <g key={i}>
                 {theoIdx !== -1 && (
                   <>
                     <rect x={x} y={chartHeight - hTheo} width={barWidth} height={hTheo} rx="3" fill="#f59e0b" />
-                    {hTheo > 18 && (
-                      <text x={x + barWidth / 2} y={chartHeight - hTheo - 4} fontSize="9" textAnchor="middle" fill="#78350f">
+                    {item.theo > 0 && (
+                      <text x={x + barWidth / 2} y={chartHeight - hTheo - 4} fontSize="9" fontWeight="600" textAnchor="middle" fill="#92400e">
                         {Math.round(item.theo)}
                       </text>
                     )}
@@ -103,15 +156,16 @@ function SvgChart({ rows }: { rows: string[][] }) {
                 {actualIdx !== -1 && (
                   <>
                     <rect x={theoIdx !== -1 ? x + barWidth + 2 : x} y={chartHeight - hActual} width={barWidth} height={hActual} rx="3" fill="#3b82f6" />
-                    {hActual > 18 && (
-                      <text x={(theoIdx !== -1 ? x + barWidth + 2 : x) + barWidth / 2} y={chartHeight - hActual - 4} fontSize="9" textAnchor="middle" fill="#1e3a8a">
+                    {item.actual > 0 && (
+                      <text x={(theoIdx !== -1 ? x + barWidth + 2 : x) + barWidth / 2} y={chartHeight - hActual - 4} fontSize="9" fontWeight="600" textAnchor="middle" fill="#1e40af">
                         {Math.round(item.actual)}
                       </text>
                     )}
                   </>
                 )}
-                <text x={x + barWidth} y={chartHeight + 16} fontSize="10" textAnchor="middle" fill="#475569">
-                  {item.label}
+                {/* Clean non-colliding formatted label */}
+                <text x={x + barWidth} y={chartHeight + 18} fontSize="10" fontWeight="500" textAnchor="middle" fill="#334155">
+                  {item.displayLabel}
                 </text>
               </g>
             )

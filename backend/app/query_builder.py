@@ -55,13 +55,13 @@ def build_query(intent: Intent) -> Select:
     if intent.operation == "row_count":
         return filtered(select(func.count(ExcavationRecord.id)))
     if intent.operation == "record":
-        return filtered(select(ExcavationRecord)).order_by(ExcavationRecord.date)
+        return filtered(select(ExcavationRecord)).order_by(sortable_date)
     if intent.operation == "range_records":
-        return filtered(select(ExcavationRecord)).order_by(ExcavationRecord.date)
+        return filtered(select(ExcavationRecord)).order_by(sortable_date)
     if intent.operation == "day_records":
-        return filtered(select(ExcavationRecord)).order_by(ExcavationRecord.date)
+        return filtered(select(ExcavationRecord)).order_by(sortable_date)
     if intent.operation == "highest":
-        return filtered(select(ExcavationRecord)).order_by(ExcavationRecord.actual_volume.desc(), ExcavationRecord.date).limit(1)
+        return filtered(select(ExcavationRecord)).order_by(ExcavationRecord.actual_volume.desc(), sortable_date).limit(1)
     if intent.operation == "group_by_support":
         if intent.metric == "both":
             statement = select(

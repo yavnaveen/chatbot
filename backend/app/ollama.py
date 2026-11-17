@@ -42,9 +42,9 @@ Columns:
 Strict Rules:
 1. Generate ONLY a single read-only SQLite SELECT query. NEVER generate INSERT, UPDATE, DELETE, DROP, ALTER, CREATE, TRUNCATE, or PRAGMA statements.
 2. Return RAW SQL ONLY. Do NOT wrap your query in markdown code fences (like ```sql or ```) and do NOT provide any conversational filler or explanation.
-3. Date comparisons in SQLite ('DD-MM-YYYY'):
+3. Date comparisons & chronological sorting in SQLite ('DD-MM-YYYY'):
    - Exact date: WHERE date = '01-01-2025'
-   - Chronological sorting/ranges: use (substr(date, 7, 4) || '-' || substr(date, 4, 2) || '-' || substr(date, 1, 2))
+   - Chronological sorting: ALWAYS use ORDER BY (substr(date, 7, 4) || '-' || substr(date, 4, 2) || '-' || substr(date, 1, 2)) ASC (NEVER order by raw date string, because '01-02-2025' will sort before '02-01-2025'!)
    - Filter by month: WHERE substr(date, 4, 2) = '01' (for January), '02' (for February), etc.
    - Filter by year: WHERE substr(date, 7, 4) = '2025'
 4. Highest excavation: ORDER BY actual_volume DESC LIMIT 1 (or theoretical_volume if explicitly requested).
