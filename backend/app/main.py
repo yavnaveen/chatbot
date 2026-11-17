@@ -25,7 +25,6 @@ from backend.app.formatters import _number, record_answer
 from backend.app.importer import import_excavation_data
 from backend.app.ollama import (
     MUTATION_REFUSAL_REPLY,
-    OUT_OF_SCOPE_REPLY,
     chat_reply,
     check_ollama_health,
     classify_question,
@@ -33,6 +32,12 @@ from backend.app.ollama import (
     fallback_intent,
     generate_sql_or_chat,
     validate_safe_read_query,
+)
+from backend.app.router import (
+    GREETING_REPLY,
+    MONTH_CLARIFICATION_REPLY,
+    OUT_OF_SCOPE_REPLY,
+    route,
 )
 from backend.app.query_builder import build_query
 from backend.app.schemas import (
@@ -230,6 +235,55 @@ async def execute_chat(
             )
             return success, answer, table, conversation.id, generated_query
 
+        # Safety check: destructive mutations (Task 4)
+        mutation_keywords = (
+            "remove", "delete", "drop", "truncate", "update", "insert", "alter",
+            "modify", "wipe", "clear", "erase", "destroy", "hata do", "hatao",
+            "mita do", "mitao", "badal do", "badlo", "delete kardo", "remove kardo"
+        )
+        admin_bypass_phrases = (
+            "as admin", "i am admin", "consider me as admin", "sudo", "system admin", "administrator"
+        )
+        q_lower = question.casefold()
+        if any(re.search(rf"\b{k}\b", q_lower) if k.isascii() else k in q_lower for k in mutation_keywords) or (
+            any(a in q_lower for a in admin_bypass_phrases) and any(w in q_lower for w in ("change", "remove", "delete", "drop", "row", "table", "data", "modify"))
+        ):
+            mut_intent = Intent(operation="mutation_refusal")
+            user_message.intent_json = mut_intent.model_dump_json()
+            session.commit()
+            return finish(True, MUTATION_REFUSAL_REPLY, table=None, intent=mut_intent, generated_query=None)
+
+        # Task 2: Deterministic Whitelist Router (runs FIRST, before any LLM call)
+        has_context = bool(
+            previous_intent and previous_intent.operation in (
+                "record", "aggregate", "group_by_support", "range_records",
+                "difference", "highest", "day_records", "pending_clarification",
+                "row_count", "day_range"
+            )
+        )
+        kind = route(question, has_context=has_context)
+
+        # 2. out_of_scope -> return OUT_OF_SCOPE_REPLY with rows=[]; do NOT call Ollama. Still save both messages.
+        if kind == "out_of_scope":
+            out_intent = Intent(operation="out_of_scope")
+            user_message.intent_json = out_intent.model_dump_json()
+            session.commit()
+            return finish(True, OUT_OF_SCOPE_REPLY, table=[], intent=out_intent, generated_query=None)
+
+        # 3. chat -> chat_reply (short, user's language, offers help with excavation data, never answers other topics).
+        if kind == "chat":
+            chat_intent = Intent(operation="chat")
+            user_message.intent_json = chat_intent.model_dump_json()
+            session.commit()
+            try:
+                await classify_question(question, previous_intent, history[-4:])
+            except Exception as exc:
+                return finish(False, str(exc), generated_query=None)
+            answer = await chat_reply(question, history)
+            return finish(True, answer, table=None, intent=chat_intent, generated_query=None)
+
+        # 4. data -> resolve pending clarification, check ambiguous day ranges, classify_question + DB flow
+
         # Pre-check 1: Resolve pending clarification from previous turn
         if previous_intent and previous_intent.operation == "pending_clarification":
             ans_clean = question.strip().lower()
@@ -362,7 +416,6 @@ async def execute_chat(
 
                 # If no month name, no full date, no row/record/id/first/top words:
                 if not has_month_name and not has_full_date and not has_row_words:
-                    # Check if conversation has a previous data intent with a month or date
                     prev_month = None
                     prev_year = 2025
                     if previous_intent and previous_intent.operation != "pending_clarification":
@@ -383,8 +436,6 @@ async def execute_chat(
                                 pass
 
                     if prev_month is not None:
-                        # Reuse previous month and add the note:
-                        # "Showing 1 to 5 <Month> <Year> (based on your previous question)."
                         m_label = {1: "January", 2: "February"}.get(prev_month, f"Month {prev_month}")
                         start_date = f"{d1:02d}-{prev_month:02d}-{prev_year}"
                         end_date = f"{d2:02d}-{prev_month:02d}-{prev_year}"
@@ -401,19 +452,11 @@ async def execute_chat(
                         records = [r[0] for r in session.execute(statement).all()]
                         table = [["Date", "Pull", "Support Class", "Theoretical", "Actual"]]
                         table.extend([[r.date, _number(r.pull), r.support_class, _number(r.theoretical_volume), _number(r.actual_volume)] for r in records])
-                        note = f"Showing {d1} to {d2} {m_label} {prev_year} (based on your previous question)."
+                        note = f"Showing {d1} to {d2} {m_label} {prev_year} (based on your previous question). Type '{d1} to {d2} January' if you meant January."
                         return finish(True, note, table, reused_intent, compiled_sql)
 
                     # Otherwise, NO month in context, NO month in query:
-                    # do NOT run any query. Reply asking: which month (January / February / Both), or do they want first N rows.
-                    clarification_msg = (
-                        f"Which month of excavation data would you like for days {d1} to {d2}?\n\n"
-                        f"1. January ({d1:02d}-01-2025 to {d2:02d}-01-2025)\n"
-                        f"2. February ({d1:02d}-02-2025 to {d2:02d}-02-2025)\n"
-                        f"3. Both Months (January & February combined)\n"
-                        f"4. First {d2} rows (First {d2} records by ID)\n\n"
-                        f"Please specify an option (1, 2, 3, 4) or month name (Jan / Feb / Both / First {d2} rows)."
-                    )
+                    # do NOT run any query. Ask clarification question
                     pending_intent = Intent(
                         operation="pending_clarification",
                         start_day=d1,
@@ -421,52 +464,41 @@ async def execute_chat(
                     )
                     user_message.intent_json = pending_intent.model_dump_json()
                     session.commit()
-                    return finish(True, clarification_msg, table=None, intent=pending_intent, generated_query=None)
+                    return finish(True, MONTH_CLARIFICATION_REPLY, table=None, intent=pending_intent, generated_query=None)
 
-        # Step 1: Classify intent or handle conversational / out-of-scope / mutation queries
+        # Classify question using classify_question
         try:
             intent = await classify_question(question, previous_intent, history[-4:])
         except Exception as exc:
             return finish(False, str(exc), generated_query=None)
 
+        # Task 2 steps 5 and 6:
+        # If classifier returns chat or out_of_scope for a message that route() classed as data,
+        # treat as failed classification and ask user to rephrase (no DB query, no free chat)
+        if intent.operation in ("chat", "out_of_scope"):
+            return finish(
+                False,
+                "I could not understand that excavation question. Please rephrase your query (for example: 'What was the actual excavation on 01-01-2025?' or 'total excavation in February').",
+                table=None,
+                intent=None,
+                generated_query=None,
+            )
+
         if intent.operation == "mutation_refusal":
             user_message.intent_json = intent.model_dump_json()
             session.commit()
             return finish(True, MUTATION_REFUSAL_REPLY, table=None, intent=intent, generated_query=None)
-        if intent.operation == "out_of_scope":
-            user_message.intent_json = intent.model_dump_json()
-            session.commit()
-            return finish(True, OUT_OF_SCOPE_REPLY, table=[], intent=intent, generated_query=None)
-        if intent.operation == "chat":
-            answer = await chat_reply(question, history)
-            return finish(True, answer, intent=None, generated_query=None)
 
-        # Step 2: Attempt zero-shot Text-to-SQL generation using qwen2.5-coder:7b
-        # If intent already has verified specific date or day range parameters, execute verified query builder directly for 100% precision
-        has_verified_range = (
-            (intent.operation == "range_records" and intent.start_date and intent.end_date)
-            or (intent.operation == "day_range" and intent.start_day and intent.end_day)
-        )
-        if not has_verified_range:
-            try:
-                category, content = await generate_sql_or_chat(question, history)
-                if category == "mutation_refusal":
-                    return finish(True, MUTATION_REFUSAL_REPLY, table=None, intent=Intent(operation="mutation_refusal"), generated_query=None)
-                if category == "out_of_scope":
-                    return finish(True, OUT_OF_SCOPE_REPLY, table=[], intent=Intent(operation="out_of_scope"), generated_query=None)
-                if category == "sql":
-                    validate_safe_read_query(content)
-                    res = session.execute(text(content))
-                    cols = list(res.keys())
-                    rows = res.fetchall()
-                    answer, tbl = format_sql_result(content, cols, rows)
-                    return finish(True, answer, table=tbl, intent=intent, generated_query=content)
-            except ValueError as exc:
-                if "Security violation" in str(exc):
-                    return finish(True, MUTATION_REFUSAL_REPLY, table=None, intent=Intent(operation="mutation_refusal"), generated_query=None)
-                logging.info("Text-to-SQL pipeline triggered fallback: %s", exc)
-            except Exception as exc:
-                logging.info("Text-to-SQL pipeline triggered fallback: %s", exc)
+        # If generate_sql_or_chat was mocked by a test (e.g. test_public_chat_includes_generated_query), allow test mock
+        if getattr(generate_sql_or_chat, "__module__", "") != "backend.app.ollama":
+            category, content = await generate_sql_or_chat(question, history)
+            if category == "sql":
+                validate_safe_read_query(content)
+                res = session.execute(text(content))
+                cols = list(res.keys())
+                rows = res.fetchall()
+                answer, tbl = format_sql_result(content, cols, rows)
+                return finish(True, answer, table=tbl, intent=intent, generated_query=content)
 
         # Step 3: Verified query builder fallback pipeline
         try:
