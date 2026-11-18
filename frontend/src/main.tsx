@@ -409,7 +409,7 @@ export function App() {
               <path d="M8 20v-8a4 4 0 0 1 8 0v8" />
             </svg>
           </div>
-          <span>Tunnel Excavation AI</span>
+          <span>SISO AI</span>
         </div>
 
         <button className="new" type="button" onClick={newChat}>
@@ -493,14 +493,13 @@ export function App() {
               <p>Ask about dates, support class, chainage or theoretical vs actual excavation.</p>
             </div>
           </div>
-          <span className="pill">Project data: 01-01-2025 to 28-02-2025</span>
         </header>
 
         <div className="feed" aria-live="polite">
           {messages.length === 0 && (
             <div className="empty-state-card">
               <div className="empty-state-icon">🚇</div>
-              <h2>Tunnel Excavation Assistant</h2>
+              <h2>SISO AI Assistant</h2>
               <p>Ask about excavation dates, pull, support classes (A-F), chainage, or compare theoretical vs actual volume.</p>
             </div>
           )}
