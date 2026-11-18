@@ -165,3 +165,14 @@ def test_minimun_actaul_excavtion_typos():
     assert "01-01-2025" in ans
     assert data.get("table") is None
     assert data.get("can_show_rows") is True
+
+
+def test_out_of_range_month_gives_no_records_found():
+    with get_client() as client:
+        res = client.post("/api/chat", json={"question": "give me all data for march 2025"})
+    assert res.status_code == 200
+    data = res.json()
+    assert data["success"] is True
+    assert "No records found for March 2025. Available data: 01-01-2025 to 28-02-2025." in data["answer"]
+    assert "Did you mean" not in data["answer"]
+    assert data.get("table") in (None, [])

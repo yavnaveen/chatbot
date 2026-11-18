@@ -4,8 +4,22 @@ from typing import List, Optional, Tuple
 VALID_CLASSES = {"A", "B", "C", "D", "E", "F"}
 VALID_MONTHS = {1, 2}  # January and February
 VALID_YEAR = 2025
+MONTH_NAMES = {
+    1: "January",
+    2: "February",
+    3: "March",
+    4: "April",
+    5: "May",
+    6: "June",
+    7: "July",
+    8: "August",
+    9: "September",
+    10: "October",
+    11: "November",
+    12: "December",
+}
 
-# Dates known to exist in the 2-month dataset (01-01-2025 to 31-01-2025 and 01-02-2025 to 25-02-2025)
+# Dates known to exist in the 2-month dataset (01-01-2025 to 28-02-2025)
 def is_valid_date(date_str: Optional[str]) -> bool:
     if not date_str:
         return False
@@ -21,7 +35,7 @@ def is_valid_date(date_str: Optional[str]) -> bool:
     if m == 1:
         return 1 <= d <= 31
     if m == 2:
-        return 1 <= d <= 25
+        return 1 <= d <= 28
     return False
 
 
@@ -184,28 +198,32 @@ def validate_intent_answerability(
     if confidence < 0.5 or op == "clarify":
         return False, "clarify", make_clarify_reply(corrected)
 
-    # 5. Check database boundaries per operation
+    # 5. Check if named month or date is out of available data range (Requirement 9)
+    m = intent_data.get("month")
+    y = intent_data.get("year") or 2025
+    if m is not None and m not in VALID_MONTHS:
+        m_name = MONTH_NAMES.get(m, f"Month {m}")
+        return False, "clarify", f"No records found for {m_name} {y}. Available data: 01-01-2025 to 28-02-2025."
+
+    date_val = intent_data.get("date")
+    if date_val and not is_valid_date(date_val):
+        return False, "clarify", f"No records found for {date_val}. Available data: 01-01-2025 to 28-02-2025."
+
+    s_date = intent_data.get("start_date")
+    e_date = intent_data.get("end_date")
+    if (s_date or e_date) and (not is_valid_date(s_date) or not is_valid_date(e_date)):
+        scope_d = f"{s_date} to {e_date}" if (s_date and e_date) else (s_date or e_date or "specified range")
+        return False, "clarify", f"No records found for {scope_d}. Available data: 01-01-2025 to 28-02-2025."
+
+    # 6. Check database boundaries per operation
     if op == "record":
-        date_val = intent_data.get("date")
-        if not date_val or not is_valid_date(date_val):
+        if not date_val:
             return False, "clarify", make_clarify_reply(f"What was the excavation on 01-01-2025?")
 
     elif op == "range_records":
-        s_date = intent_data.get("start_date")
-        e_date = intent_data.get("end_date")
-        m = intent_data.get("month")
-        if s_date or e_date:
-            if not s_date or not e_date or not is_valid_date(s_date) or not is_valid_date(e_date):
-                return False, "clarify", make_clarify_reply("excavation from 01-01-2025 to 05-01-2025")
-        elif m is not None:
-            if m not in VALID_MONTHS:
-                return False, "clarify", make_clarify_reply("show records for January")
+        pass
 
     elif op == "aggregate":
-        # Check month if provided
-        m = intent_data.get("month")
-        if m is not None and m not in VALID_MONTHS:
-            return False, "clarify", make_clarify_reply(f"total excavation in January")
         # Check support class if provided
         sc = intent_data.get("support_class")
         if sc and sc.upper() not in VALID_CLASSES:

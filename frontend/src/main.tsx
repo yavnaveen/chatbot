@@ -265,13 +265,30 @@ export function App() {
   const [loading, setLoading] = useState(false)
   const [editingId, setEditingId] = useState<number | null>(null)
   const [editingTitle, setEditingTitle] = useState('')
-  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [sidebarOpen, setSidebarOpen] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      if (window.innerWidth < 820) return false
+      const saved = localStorage.getItem('siso-sidebar-open')
+      return saved !== null ? saved === 'true' : true
+    }
+    return true
+  })
   const [uploading, setUploading] = useState(false)
   const [chartViews, setChartViews] = useState<Record<number, boolean>>({})
   const [expandedRecords, setExpandedRecords] = useState<Record<number, boolean>>({})
   const [rowLimits, setRowLimits] = useState<Record<number, number>>({})
   const bottomRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  function toggleSidebar() {
+    setSidebarOpen((prev) => {
+      const next = !prev
+      if (typeof window !== 'undefined' && window.innerWidth >= 820) {
+        localStorage.setItem('siso-sidebar-open', String(next))
+      }
+      return next
+    })
+  }
 
   async function loadConversations() {
     const response = await fetch(`${API_BASE}/api/conversations`, { headers: getHeaders() })
@@ -298,7 +315,9 @@ export function App() {
   function selectConversation(id: number) {
     setActiveId(id)
     localStorage.setItem('tunnel-active-conversation', String(id))
-    setSidebarOpen(false)
+    if (typeof window !== 'undefined' && window.innerWidth < 820) {
+      setSidebarOpen(false)
+    }
     void loadMessages(id).catch(() => setMessages([]))
   }
 
@@ -306,7 +325,9 @@ export function App() {
     setActiveId(null)
     setMessages([])
     localStorage.removeItem('tunnel-active-conversation')
-    setSidebarOpen(false)
+    if (typeof window !== 'undefined' && window.innerWidth < 820) {
+      setSidebarOpen(false)
+    }
   }
 
   async function renameConversation(id: number) {
@@ -401,7 +422,7 @@ export function App() {
 
   return (
     <div className="app">
-      <aside className={`side ${sidebarOpen ? 'open' : ''}`}>
+      <aside className={`side ${sidebarOpen ? 'open' : 'collapsed'}`}>
         <div className="brand">
           <div className="logo">
             <img src="/siso-icon.png" alt="SISO Logo" className="brand-logo-img" />
@@ -475,13 +496,22 @@ export function App() {
         </div>
       </aside>
 
+      {sidebarOpen && (
+        <div
+          className="sidebar-backdrop"
+          onClick={() => setSidebarOpen(false)}
+          aria-label="Close menu backdrop"
+        />
+      )}
+
       <section className="main">
         <header className="top">
           <div className="top-left">
             <button
               className="mobile-toggle"
-              onClick={() => setSidebarOpen(!sidebarOpen)}
-              aria-label="Toggle conversations menu"
+              onClick={toggleSidebar}
+              aria-label="Toggle navigation menu"
+              title={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
             >
               ☰
             </button>
@@ -518,9 +548,10 @@ export function App() {
               : (expandedRecords[index] && message.all_rows && message.all_rows.length > 0)
                 ? message.all_rows
                 : null
+            const hasTable = Boolean(effectiveRows)
 
             return (
-              <div className="bot" key={`${message.created_at ?? 'new'}-${index}`}>
+              <div className={`bot ${hasTable ? 'has-table' : ''}`} key={`${message.created_at ?? 'new'}-${index}`}>
                 <p>{cleanAnswer(message.content)}</p>
 
                 {message.assumptions && message.assumptions.length > 0 && (
