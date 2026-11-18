@@ -376,13 +376,6 @@ function App() {
               <div className="bubble">
                 {cleanAnswer(message.content)}
 
-                {message.generated_query && (
-                  <details className="sql-details">
-                    <summary className="sql-summary">🔍 View Executed SQL Query</summary>
-                    <pre className="sql-block"><code>{message.generated_query}</code></pre>
-                  </details>
-                )}
-
                 {message.rows && message.rows.length > 0 && (
                   <div className="table-wrapper-box">
                     <div className="table-toolbar">
