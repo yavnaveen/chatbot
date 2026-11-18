@@ -294,9 +294,9 @@ def fallback_intent(
     admin_bypass_phrases = (
         "as admin", "i am admin", "consider me as admin", "sudo", "system admin", "administrator"
     )
-    if any(k in text_val for k in mutation_keywords):
+    if any(re.search(rf"\b{re.escape(k)}\b", text_val) for k in mutation_keywords):
         return Intent(operation="mutation_refusal")
-    if any(a in text_val for a in admin_bypass_phrases) and any(w in text_val for w in ("change", "remove", "delete", "drop", "row", "table", "data", "modify")):
+    if any(re.search(rf"\b{re.escape(a)}\b", text_val) for a in admin_bypass_phrases) and any(re.search(rf"\b{re.escape(w)}\b", text_val) for w in ("change", "remove", "delete", "drop", "row", "table", "data", "modify")):
         return Intent(operation="mutation_refusal")
 
     if re.fullmatch(
@@ -320,17 +320,17 @@ def fallback_intent(
         if support_match and not remainder:
             return previous_intent.model_copy(update={"support_class": support_match.group(1).upper()})
 
-    if any(phrase in text_val for phrase in ("kitni row", "kitne row", "kitna data", "how many rows", "total rows", "how many records", "total records", "kitne record", "kitna record", "kitni records")):
+    if any(re.search(rf"\b{re.escape(phrase)}\b", text_val) for phrase in ("kitni row", "kitne row", "kitna data", "how many rows", "total rows", "how many records", "total records", "kitne record", "kitna record", "kitni records")):
         return Intent(operation="row_count")
-    if any(phrase in text_val for phrase in ("sara data", "saara data", "all data", "all records", "sara excavation", "saara excavation", "pura data", "full table", "sari row", "puri table")):
+    if any(re.search(rf"\b{re.escape(phrase)}\b", text_val) for phrase in ("sara data", "saara data", "all data", "all records", "sara excavation", "saara excavation", "pura data", "full table", "sari row", "puri table")):
         return Intent(operation="range_records", metric="both")
 
-    metric = "theoretical" if "theoretical" in text_val or "सैद्धांतिक" in text_val else "actual" if "actual" in text_val or "वास्तविक" in text_val else "both"
+    metric = "theoretical" if re.search(r"\b(?:theoretical|सैद्धांतिक)\b", text_val) else "actual" if re.search(r"\b(?:actual|वास्तविक)\b", text_val) else "both"
     dates = extract_dates_from_text(text_val)
     support_match = re.search(r"(?:support\s*class|class)\s*([a-f])\b|\b([a-f])\s*class\b", text_val)
     support_class = (support_match.group(1) or support_match.group(2)).upper() if support_match else None
     day_match = re.search(r"\b(\d{1,2})\s*(?:ko|date|tarikh|तारीख)\b", text_val)
-    if day_match and ("pull" in text_val or "support" in text_val or "class" in text_val):
+    if day_match and re.search(r"\b(?:pull|support|class)\b", text_val):
         return Intent(operation="day_records", metric="both", day=int(day_match.group(1)))
 
     if (
@@ -341,9 +341,9 @@ def fallback_intent(
         or ("support class" in text_val and ("how much" in text_val or "kitna" in text_val or "कितना" in text_val) and not support_class)
     ):
         return Intent(operation="group_by_support", metric=metric)
-    if "difference" in text_val or "अंतर" in text_val or "farq" in text_val or ("theoretical" in text_val and "actual" in text_val and ("compare" in text_val or "versus" in text_val)):
+    if re.search(r"\b(?:difference|अंतर|farq)\b", text_val) or (re.search(r"\btheoretical\b", text_val) and re.search(r"\bactual\b", text_val) and re.search(r"\b(?:compare|versus|vs)\b", text_val)):
         return Intent(operation="difference", metric="both")
-    if "highest" in text_val or "maximum" in text_val or "max" in text_val or "सबसे अधिक" in text_val or "अधिकतम" in text_val or ("which date" in text_val and "excavation" in text_val):
+    if re.search(r"\b(?:highest|maximum|max|सबसे अधिक|अधिकतम)\b", text_val) or ("which date" in text_val and re.search(r"\bexcavation\b", text_val)):
         return Intent(operation="highest", metric="theoretical" if metric == "theoretical" else "actual")
 
     chainage = re.search(r"(?:chainage|ch)\s*(?:between|from)?\s*(\d+(?:\.\d+)?)\s*(?:and|to|-)\s*(\d+(?:\.\d+)?)", text_val)
@@ -377,12 +377,12 @@ def fallback_intent(
             else:
                 return Intent(operation="day_range", metric=metric, start_day=d1, end_day=d2, year=2025)
 
-    month = next((number for name, number in MONTHS.items() if name in text_val), None)
+    month = next((number for name, number in MONTHS.items() if re.search(rf"\b{re.escape(name)}\b", text_val)), None)
     year_match = re.search(r"\b20\d{2}\b", text_val)
     year = int(year_match.group()) if year_match else None
     data_words = ("excavation", "pull", "support", "class", "chainage", "theoretical", "actual", "khudai", "खुदाई", "date", "tarikh", "तारीख")
-    if (month or any(word in text_val for word in ("total", "sum", "average", "avg", "औसत", "minimum", "maximum", "max", "kitna", "कितना", "कुल"))) and any(word in text_val for word in data_words):
-        aggregate = "avg" if "average" in text_val or "avg" in text_val or "औसत" in text_val else "min" if "minimum" in text_val else "max" if "maximum" in text_val or "max" in text_val else "sum"
+    if (month or any(re.search(rf"\b{re.escape(word)}\b", text_val) for word in ("total", "sum", "average", "avg", "औसत", "minimum", "maximum", "max", "kitna", "कितना", "कुल"))) and any(re.search(rf"\b{re.escape(word)}\b", text_val) for word in data_words):
+        aggregate = "avg" if re.search(r"\b(?:average|avg|औसत)\b", text_val) else "min" if re.search(r"\bminimum\b", text_val) else "max" if re.search(r"\b(?:maximum|max)\b", text_val) else "sum"
         if support_class:
             return Intent(operation="aggregate", metric=metric, aggregate=aggregate, support_class=support_class)
         return Intent(operation="aggregate", metric=metric, aggregate=aggregate, month=month, year=year)

@@ -117,11 +117,14 @@ def extract_entities(text: str) -> Dict[str, Any]:
             if 1 <= d_val <= 31:
                 entities["day"] = d_val
 
-    # 6. Metric
-    has_actual = any(w in text_lower for w in ("actual", "vastavik", "vaastavik", "vastvik", "वास्तविक"))
-    has_theo = any(w in text_lower for w in ("theoretical", "sidhantik", "saiddhantik", "sidhhantik", "सैद्धांतिक"))
-    has_both = any(w in text_lower for w in ("both", "dono", "difference", "compare", "versus", "vs", "farq", "antar"))
-    has_pull_and_volume = ("pull" in text_lower and "volume" in text_lower)
+    # 6. Metric (whole-word matching only)
+    def _match_any(words: tuple[str, ...]) -> bool:
+        return any(re.search(rf"\b{re.escape(w)}\b", text_lower) for w in words)
+
+    has_actual = _match_any(("actual", "vastavik", "vaastavik", "vastvik", "वास्तविक"))
+    has_theo = _match_any(("theoretical", "sidhantik", "saiddhantik", "sidhhantik", "सैद्धांतिक"))
+    has_both = _match_any(("both", "dono", "difference", "compare", "versus", "vs", "farq", "antar"))
+    has_pull_and_volume = bool(re.search(r"\bpull\b", text_lower) and re.search(r"\bvolume\b", text_lower))
 
     if has_both or (has_actual and has_theo) or has_pull_and_volume:
         entities["metric"] = "both"
@@ -132,14 +135,14 @@ def extract_entities(text: str) -> Dict[str, Any]:
     else:
         entities["metric"] = "actual"  # default metric
 
-    # 7. Aggregate
-    if any(w in text_lower for w in ("average", "avg", "mean", "ausat", "औसत")):
+    # 7. Aggregate (whole-word matching only: 'min' and 'max' must never match inside other words)
+    if _match_any(("average", "avg", "mean", "ausat", "औसत")):
         entities["aggregate"] = "avg"
-    elif any(w in text_lower for w in ("minimum", "min", "lowest", "least", "kam", "chhota", "sabse kam")):
+    elif _match_any(("minimum", "min", "lowest", "least", "kam", "chhota", "sabse kam")):
         entities["aggregate"] = "min"
-    elif any(w in text_lower for w in ("maximum", "max", "highest", "peak", "most", "adhik", "jyada", "sabse jyada", "sabse adhik")):
+    elif _match_any(("maximum", "max", "highest", "peak", "most", "adhik", "jyada", "sabse jyada", "sabse adhik")):
         entities["aggregate"] = "max"
-    elif any(w in text_lower for w in ("total", "sum", "kul", "कुल", "kitna", "pura")):
+    elif _match_any(("total", "sum", "kul", "कुल", "kitna", "pura")):
         entities["aggregate"] = "sum"
 
     return entities

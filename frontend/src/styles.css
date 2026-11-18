@@ -353,6 +353,23 @@ tr:nth-child(even) td {
   padding: 9px 12px;
 }
 
+/* Assumptions Muted Text */
+.assumptions-box {
+  margin-top: 6px;
+  font-size: 0.8rem;
+  color: #64748b;
+  font-style: italic;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.assumption-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
 /* SQL Details Toggle */
 .sql-details {
   margin-top: 10px;
@@ -517,6 +534,53 @@ tr:nth-child(even) td {
 
 .chart-svg {
   display: block;
+}
+
+.show-records-action {
+  margin-top: 10px;
+}
+
+.btn-show-records {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #f1f5f9;
+  color: #1e40af;
+  border: 1px solid #cbd5e1;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-show-records:hover {
+  background: #e2e8f0;
+  border-color: #94a3b8;
+}
+
+.show-more-box {
+  display: flex;
+  justify-content: center;
+  padding: 8px 0 4px;
+}
+
+.btn-show-more {
+  background: #f8fafc;
+  color: #3b82f6;
+  border: 1px dashed #cbd5e1;
+  padding: 5px 16px;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-show-more:hover {
+  background: #eff6ff;
+  border-color: #3b82f6;
 }
 
 @media (max-width: 700px) {

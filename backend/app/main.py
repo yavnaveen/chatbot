@@ -21,7 +21,17 @@ from backend.app.conversation_service import (
     utc_now,
 )
 from backend.app.db import Conversation, ExcavationRecord, get_session, initialize_database
-from backend.app.formatters import _number, record_answer
+from backend.app.formatters import (
+    _number,
+    build_result_table,
+    format_aggregate_answer,
+    format_difference_answer,
+    format_num,
+    get_dataset_bounds,
+    get_scope_description,
+    get_scope_target,
+    record_answer,
+)
 from backend.app.importer import import_excavation_data
 from backend.app.nlp.pipeline import process_question
 from backend.app.nlp.validator import make_clarify_reply
@@ -41,7 +51,7 @@ from backend.app.router import (
     OUT_OF_SCOPE_REPLY,
     route,
 )
-from backend.app.query_builder import build_query
+from backend.app.query_builder import build_query, build_records_query
 
 original_classify_question = classify_question
 original_chat_reply = chat_reply
@@ -195,7 +205,7 @@ async def execute_chat(
     question: str,
     conversation_id: Optional[int] = None,
     client_ip: str = "unknown",
-) -> tuple[bool, str, list[list[str]] | None, int, str | None]:
+) -> tuple[bool, str, list[list[str]] | None, int, str | None, list[str], list[list[str]] | None]:
     """Core excavation chatbot reasoning pipeline with conversation memory and Text-to-SQL."""
     start_time = time.perf_counter()
     with get_session() as session:
@@ -217,7 +227,10 @@ async def execute_chat(
             table: list[list[str]] | None = None,
             intent: Intent | None = None,
             generated_query: str | None = None,
-        ) -> tuple[bool, str, list[list[str]] | None, int, str | None]:
+            assumptions: list[str] | None = None,
+            all_rows: list[list[str]] | None = None,
+            can_show_rows: bool | None = None,
+        ) -> tuple[bool, str, list[list[str]] | None, int, str | None, list[str], list[list[str]] | None, bool | None]:
             add_message(
                 session,
                 conversation,
@@ -238,7 +251,7 @@ async def execute_chat(
                 status="success" if success else "error",
                 violation_flag=is_violation,
             )
-            return success, answer, table, conversation.id, generated_query
+            return success, answer, table, conversation.id, generated_query, assumptions or [], all_rows, can_show_rows
 
         # Safety check: destructive mutations (Task 4)
         mutation_keywords = (
@@ -507,112 +520,226 @@ async def execute_chat(
                 raise ValueError("Security violation: Only SELECT queries are permitted.")
 
             compiled_sql = str(statement.compile(compile_kwargs={"literal_binds": True}))
-            rows = session.execute(statement).all()
+
+            # Fetch matching records and bounds
+            records_stmt = build_records_query(intent)
+            records = session.scalars(records_stmt).all()
+            count = len(records)
+            first_date, last_date, total_db_count = get_dataset_bounds(session)
+
+            # Detect assumptions (Requirement 3)
+            assumptions = []
+            q_lower = question.lower()
+            has_year_in_intent = bool(
+                intent.year
+                or (intent.date and len(intent.date) >= 10)
+                or (intent.start_date and len(intent.start_date) >= 10)
+            )
+            user_typed_year = bool(
+                re.search(r"\b20\d{2}\b", q_lower) or re.search(r"[-/]25\b", q_lower)
+            )
+            if has_year_in_intent and not user_typed_year:
+                assumptions.append("Assumed year 2025 (the only year in the data).")
+
+            # 0 matching records check (Requirement 7)
+            if count == 0 and intent.operation != "group_by_support":
+                scope_tgt = get_scope_target(intent)
+                answer = f"No records found for {scope_tgt}. Available data: {first_date} to {last_date}."
+                return finish(
+                    True,
+                    answer,
+                    table=None,
+                    intent=intent,
+                    generated_query=compiled_sql,
+                    assumptions=assumptions,
+                    all_rows=None,
+                )
+
+            wants_table = bool(
+                re.search(
+                    r"\b(?:give\s+me\s+all|show\s+records|show\s+data|show\s+rows|show\s+all|show\s+me|show|list|list\s+all|sara\s+data|all\s+data|all\s+records|puri\s+table|full\s+table)\b",
+                    q_lower,
+                )
+                or (
+                    re.search(r"\b(?:data|records|rows)\b", q_lower)
+                    and not re.search(r"\b(?:minimum|min|maximum|max|total|sum|average|avg|count)\b", q_lower)
+                )
+            )
 
             if intent.operation == "row_count":
-                count_val = rows[0][0]
-                return finish(True, f"The excavation database contains {_number(count_val)} records.", table=None, intent=intent, generated_query=compiled_sql)
+                rec_word = "record" if count == 1 else "records"
+                answer = f"The excavation database contains {format_num(count)} {rec_word}."
+                display_tbl, all_tbl, _ = build_result_table(records, is_difference=False, max_display=20)
+                return finish(
+                    True,
+                    answer,
+                    table=None,
+                    intent=intent,
+                    generated_query=compiled_sql,
+                    assumptions=assumptions,
+                    all_rows=all_tbl if count >= 1 else None,
+                    can_show_rows=True if count >= 1 else None,
+                )
 
-            if intent.operation in {"record", "range_records", "day_records", "day_range"}:
-                records = [row[0] for row in rows]
-                if not records:
-                    return finish(True, "No excavation records matched that question.", intent=intent, generated_query=compiled_sql)
-                if intent.operation == "record":
-                    item = records[0]
-                    table = [
-                        ["Date", "Pull", "Support Class", "Theoretical", "Actual"],
-                        [item.date, _number(item.pull), item.support_class, _number(item.theoretical_volume), _number(item.actual_volume)],
-                    ]
-                    return finish(True, record_answer(item, intent.metric), table, intent, generated_query=compiled_sql)
-                if intent.operation == "day_records":
-                    answer = "; ".join(f"On {item.date}, pull was {_number(item.pull)} and support class was {item.support_class}." for item in records)
-                    table = [["Date", "Pull", "Support Class"]]
-                    table.extend([[item.date, _number(item.pull), item.support_class] for item in records])
-                    return finish(True, answer, table, intent, generated_query=compiled_sql)
-                if intent.operation == "day_range":
-                    month_map = {"01": "January", "02": "February"}
-                    months_present = sorted(list({rec.date[3:5] for rec in records}))
-                    m_names = " & ".join(month_map.get(m, m) for m in months_present)
-                    answer = (
-                        f"Found {len(records)} excavation record(s) for days {intent.start_day} to {intent.end_day} "
-                        f"across all available months ({m_names}). "
-                        f"(Tip: Specify a month like '1 to 5 Feb' or '1 to 5 Jan' to filter)."
-                    )
-                    table = [["Date", "Pull", "Support Class", "Theoretical", "Actual"]]
-                    table.extend([
-                        [
-                            item.date,
-                            _number(item.pull),
-                            item.support_class,
-                            _number(item.theoretical_volume),
-                            _number(item.actual_volume),
-                        ]
-                        for item in records
-                    ])
-                    return finish(True, answer, table, intent, generated_query=compiled_sql)
-                if len(records) == 1:
+            if intent.operation == "difference":
+                total_theo = sum(r.theoretical_volume for r in records)
+                total_act = sum(r.actual_volume for r in records)
+                scope_prefix, _ = get_scope_description(intent, count, first_date, last_date)
+                answer = format_difference_answer(scope_prefix, total_theo, total_act, count)
+                display_tbl, all_tbl, is_trunc = build_result_table(records, is_difference=True, max_display=20)
+                is_range = bool(intent.start_date and intent.end_date) or bool(intent.start_day and intent.end_day)
+                show_tbl = (is_range or wants_table) and count >= 2
+                if show_tbl and is_trunc:
+                    answer += f" Showing first 20 of {count} records."
+                table_res = display_tbl if show_tbl else None
+                can_show = True if (table_res is None and count >= 1) else None
+                return finish(
+                    True,
+                    answer,
+                    table=table_res,
+                    intent=intent,
+                    generated_query=compiled_sql,
+                    assumptions=assumptions,
+                    all_rows=all_tbl if count >= 1 else None,
+                    can_show_rows=can_show,
+                )
+
+            if intent.operation == "aggregate":
+                scope_prefix, scope_phrase = get_scope_description(intent, count, first_date, last_date)
+                agg_type = intent.aggregate or "sum"
+                vals_act = [r.actual_volume for r in records]
+                vals_theo = [r.theoretical_volume for r in records]
+                if agg_type == "sum":
+                    act_val = sum(vals_act)
+                    theo_val = sum(vals_theo)
+                elif agg_type == "avg":
+                    act_val = sum(vals_act) / count if count else 0
+                    theo_val = sum(vals_theo) / count if count else 0
+                elif agg_type == "min":
+                    act_val = min(vals_act) if count else 0
+                    theo_val = min(vals_theo) if count else 0
+                else:  # max
+                    act_val = max(vals_act) if count else 0
+                    theo_val = max(vals_theo) if count else 0
+
+                col = "theoretical_volume" if intent.metric == "theoretical" else "actual_volume"
+                extreme_rec = None
+                if agg_type in ("min", "max") and records:
+                    extreme_rec = min(records, key=lambda r: getattr(r, col)) if agg_type == "min" else max(records, key=lambda r: getattr(r, col))
+
+                answer = format_aggregate_answer(intent, scope_prefix, act_val, theo_val, extreme_record=extreme_rec)
+                display_tbl, all_tbl, is_trunc = build_result_table(records, is_difference=False, max_display=20)
+                show_tbl = wants_table and count >= 2
+                if show_tbl and is_trunc:
+                    answer += f" Showing first 20 of {count} records."
+                table_res = display_tbl if show_tbl else None
+                can_show = True if (table_res is None and count >= 1) else None
+                return finish(
+                    True,
+                    answer,
+                    table=table_res,
+                    intent=intent,
+                    generated_query=compiled_sql,
+                    assumptions=assumptions,
+                    all_rows=all_tbl if count >= 1 else None,
+                    can_show_rows=can_show,
+                )
+
+            if intent.operation == "record":
+                item = records[0]
+                display_tbl = [
+                    ["Date", "Pull", "Support Class", "Theoretical", "Actual"],
+                    [item.date, format_num(item.pull), item.support_class, format_num(item.theoretical_volume), format_num(item.actual_volume)],
+                ]
+                answer = record_answer(item, intent.metric)
+                return finish(
+                    True,
+                    answer,
+                    table=display_tbl,
+                    intent=intent,
+                    generated_query=compiled_sql,
+                    assumptions=assumptions,
+                    all_rows=display_tbl,
+                )
+
+            if intent.operation in {"range_records", "day_records", "day_range"}:
+                scope_prefix, _ = get_scope_description(intent, count, first_date, last_date)
+                rec_word = "record" if count == 1 else "records"
+                if count == 1:
                     answer = record_answer(records[0], intent.metric)
                 else:
-                    date_range_str = f" from {records[0].date} to {records[-1].date}" if records else ""
                     context_note = ""
                     if intent.month and not extract_dates_from_text(question):
                         month_name = {1: "January", 2: "February"}.get(intent.month, f"Month {intent.month}")
                         context_note = f" (auto-resolved from previous {month_name} context)"
-                    answer = f"Found {len(records)} excavation record(s){date_range_str}{context_note}:"
-                table = [["Date", "Pull", "Support Class", "Theoretical", "Actual"]]
-                table.extend([
-                    [
-                        item.date,
-                        _number(item.pull),
-                        item.support_class,
-                        _number(item.theoretical_volume),
-                        _number(item.actual_volume),
-                    ]
-                    for item in records
-                ])
-                return finish(True, answer, table, intent, generated_query=compiled_sql)
+                    answer = f"{scope_prefix}Showing {count} {rec_word}{context_note}:"
+                display_tbl, all_tbl, is_trunc = build_result_table(records, is_difference=False, max_display=20)
+                if is_trunc:
+                    answer += f" Showing first 20 of {count} records."
+                return finish(
+                    True,
+                    answer,
+                    table=display_tbl,
+                    intent=intent,
+                    generated_query=compiled_sql,
+                    assumptions=assumptions,
+                    all_rows=all_tbl,
+                )
 
-            if intent.operation == "highest":
-                if not rows:
-                    return finish(True, "No excavation records matched that question.", intent=intent, generated_query=compiled_sql)
-                record = rows[0][0]
-                return finish(True, f"The highest actual excavation was {_number(record.actual_volume)} on {record.date}.", intent=intent, generated_query=compiled_sql)
+            if intent.operation in {"highest", "lowest"}:
+                col = "theoretical_volume" if intent.metric == "theoretical" else "actual_volume"
+                extreme_rec = max(records, key=lambda r: getattr(r, col)) if intent.operation == "highest" else min(records, key=lambda r: getattr(r, col))
+                metric_name = "theoretical" if intent.metric == "theoretical" else "actual"
+                scope_prefix, _ = get_scope_description(intent, count, first_date, last_date)
+                op_label = "Highest" if intent.operation == "highest" else "Minimum"
+                val = getattr(extreme_rec, col)
+                answer = f"{scope_prefix}{op_label} {metric_name} excavation: {format_num(val)} (on {extreme_rec.date}, support class {extreme_rec.support_class})."
+                display_tbl, all_tbl, is_trunc = build_result_table(records, is_difference=False, max_display=20)
+                show_tbl = wants_table
+                table_res = display_tbl if show_tbl else None
+                can_show = True if (table_res is None and count >= 1) else None
+                return finish(
+                    True,
+                    answer,
+                    table=table_res,
+                    intent=intent,
+                    generated_query=compiled_sql,
+                    assumptions=assumptions,
+                    all_rows=all_tbl if count >= 1 else None,
+                    can_show_rows=can_show,
+                )
 
             if intent.operation == "group_by_support":
+                rows = session.execute(statement).all()
                 if not rows:
-                    return finish(True, "No excavation records matched that question.", intent=intent, generated_query=compiled_sql)
+                    return finish(
+                        True,
+                        "No excavation records matched that question.",
+                        intent=intent,
+                        generated_query=compiled_sql,
+                        assumptions=assumptions,
+                    )
                 if intent.metric == "both":
                     answer = "; ".join(
-                        f"Support class {support}: {_number(actual or 0)} actual, {_number(theoretical or 0)} theoretical excavation"
+                        f"Support class {support}: {format_num(actual or 0)} actual, {format_num(theoretical or 0)} theoretical excavation"
                         for support, theoretical, actual in rows
                     )
                     table = [["Support Class", "Actual Excavation", "Theoretical Excavation"]]
-                    table.extend([[support, _number(actual or 0), _number(theoretical or 0)] for support, theoretical, actual in rows])
+                    table.extend([[support, format_num(actual or 0), format_num(theoretical or 0)] for support, theoretical, actual in rows])
                 else:
                     metric_name = "theoretical" if intent.metric == "theoretical" else "actual"
-                    answer = "; ".join(f"Support class {support}: {_number(total or 0)} {metric_name} excavation" for support, total in rows)
+                    answer = "; ".join(f"Support class {support}: {format_num(total or 0)} {metric_name} excavation" for support, total in rows)
                     table = [["Support Class", f"{metric_name.title()} Excavation"]]
-                    table.extend([[support, _number(total or 0)] for support, total in rows])
-                return finish(True, answer + ".", table, intent, generated_query=compiled_sql)
-
-            if intent.operation == "difference":
-                theoretical, actual = rows[0]
-                difference = (actual or 0) - (theoretical or 0)
-                answer = f"Theoretical excavation was {_number(theoretical or 0)}, actual excavation was {_number(actual or 0)}, so actual minus theoretical was {_number(difference)}."
-                return finish(True, answer, intent=intent, generated_query=compiled_sql)
-
-            if intent.metric == "both":
-                theoretical, actual = rows[0]
-                label = {"sum": "Total", "avg": "Average", "min": "Minimum", "max": "Maximum"}[intent.aggregate or "sum"]
-                answer = f"{label} actual excavation was {_number(actual or 0)} and {label.lower()} theoretical excavation was {_number(theoretical or 0)}."
-                return finish(True, answer, intent=intent, generated_query=compiled_sql)
-
-            value = rows[0][0]
-            if value is None:
-                return finish(True, "No excavation records matched that question.", intent=intent, generated_query=compiled_sql)
-            label = {"sum": "Total", "avg": "Average", "min": "Minimum", "max": "Maximum"}[intent.aggregate or "sum"]
-            metric = "theoretical" if intent.metric == "theoretical" else "actual"
-            return finish(True, f"{label} {metric} excavation was {_number(value)}.", intent=intent, generated_query=compiled_sql)
+                    table.extend([[support, format_num(total or 0)] for support, total in rows])
+                return finish(
+                    True,
+                    answer + ".",
+                    table=table,
+                    intent=intent,
+                    generated_query=compiled_sql,
+                    assumptions=assumptions,
+                    all_rows=table,
+                )
 
         except RuntimeError as exc:
             return finish(False, str(exc), generated_query=None)
@@ -630,7 +757,7 @@ async def execute_chat(
 async def public_chat(payload: PublicChatRequest, request: Request) -> PublicChatResponse:
     """Public chat endpoint accepting JSON {"message": "user question"} and returning {"response": "formatted answer", "generated_query": "...", "status": "success"}."""
     client_ip = request.headers.get("CF-Connecting-IP") or (request.client.host if request.client else "unknown")
-    success, answer, table, conversation_id, generated_query = await execute_chat(
+    success, answer, table, conversation_id, generated_query, assumptions, all_rows, can_show_rows = await execute_chat(
         question=payload.query_text,
         conversation_id=payload.conversation_id,
         client_ip=client_ip,
@@ -641,6 +768,9 @@ async def public_chat(payload: PublicChatRequest, request: Request) -> PublicCha
         status="success" if success else "error",
         conversation_id=conversation_id,
         table=table,
+        assumptions=assumptions if assumptions else None,
+        all_rows=all_rows if all_rows else None,
+        can_show_rows=can_show_rows,
     )
 
 
@@ -654,7 +784,7 @@ async def public_chat(payload: PublicChatRequest, request: Request) -> PublicCha
 async def api_chat_with_memory(payload: ChatRequest, request: Request) -> ChatResponse:
     """Internal / frontend chat endpoint with conversation memory."""
     client_ip = request.headers.get("CF-Connecting-IP") or (request.client.host if request.client else "unknown")
-    success, answer, table, conversation_id, generated_query = await execute_chat(
+    success, answer, table, conversation_id, generated_query, assumptions, all_rows, can_show_rows = await execute_chat(
         question=payload.question,
         conversation_id=payload.conversation_id,
         client_ip=client_ip,
@@ -665,6 +795,9 @@ async def api_chat_with_memory(payload: ChatRequest, request: Request) -> ChatRe
         table=table,
         conversation_id=conversation_id,
         generated_query=generated_query,
+        assumptions=assumptions,
+        all_rows=all_rows,
+        can_show_rows=can_show_rows,
     )
 
 

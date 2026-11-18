@@ -2,7 +2,23 @@ import re
 from typing import Optional
 from rapidfuzz import fuzz, process
 
-KNOWN_VOCAB = (
+OPERATION_WORDS = {
+    "min",
+    "max",
+    "minimum",
+    "maximum",
+    "total",
+    "sum",
+    "average",
+    "avg",
+    "highest",
+    "lowest",
+    "difference",
+    "compare",
+    "count",
+}
+
+TOPIC_WORDS = {
     "excavation",
     "theoretical",
     "actual",
@@ -10,23 +26,22 @@ KNOWN_VOCAB = (
     "class",
     "chainage",
     "pull",
-    "total",
-    "average",
-    "highest",
-    "lowest",
-    "maximum",
-    "minimum",
-    "difference",
-    "compare",
-    "between",
+    "volume",
     "record",
     "records",
-    "volume",
+    "row",
+    "rows",
     "date",
     "which",
     "under",
-    "rows",
-)
+}
+
+KNOWN_VOCAB = tuple(sorted(list(TOPIC_WORDS | OPERATION_WORDS | {"between"})))
+
+COMMON_TYPOS = {
+    "minimun": "minimum",
+    "maximun": "maximum",
+}
 
 MONTH_MAP = {
     "january": 1,
@@ -72,21 +87,55 @@ def fix_typo_month(word: str) -> Optional[str]:
 
 
 def normalize_spelling(text: str) -> str:
-    """Fix spelling of known vocabulary using rapidfuzz (score_cutoff 78, tokens >= 4 letters)."""
+    """Fix spelling of known vocabulary using rapidfuzz.
+    Rules:
+    - Tokens shorter than 5 letters are NOT fuzzy-corrected.
+    - Never map a token to an operation word unless the score is >= 88.
+    - Topic words require score >= 78.
+    """
     tokens = re.split(r"(\w+)", text)
     result = []
     for token in tokens:
-        if token.isalpha() and len(token) >= 4:
+        if token.isalpha():
             token_lower = token.lower()
-            # Check typo month first
-            month_match = fix_typo_month(token_lower)
-            if month_match and month_match in ("january", "february"):
-                result.append(month_match)
+            # 1. Exact match in known vocab or months -> preserve
+            if token_lower in KNOWN_VOCAB or token_lower in MONTH_MAP:
+                result.append(token_lower)
                 continue
 
-            match = process.extractOne(token_lower, KNOWN_VOCAB, scorer=fuzz.ratio, score_cutoff=78)
+            # 2. Common direct typos
+            if token_lower in COMMON_TYPOS:
+                result.append(COMMON_TYPOS[token_lower])
+                continue
+
+            # 3. Check typo month
+            if len(token_lower) >= 4:
+                month_match = fix_typo_month(token_lower)
+                if month_match and month_match in ("january", "february"):
+                    result.append(month_match)
+                    continue
+
+            # 4. Tokens shorter than 5 letters are NOT fuzzy-corrected
+            if len(token_lower) < 5:
+                result.append(token)
+                continue
+
+            # 5. Fuzzy match against known vocabulary
+            match = process.extractOne(token_lower, KNOWN_VOCAB, scorer=fuzz.ratio)
             if match:
-                result.append(match[0])
+                matched_word, score, _ = match
+                # Operation words require score >= 88
+                if matched_word in OPERATION_WORDS:
+                    if score >= 88:
+                        result.append(matched_word)
+                    else:
+                        result.append(token)
+                else:
+                    # Topic words require score >= 78
+                    if score >= 78:
+                        result.append(matched_word)
+                    else:
+                        result.append(token)
             else:
                 result.append(token)
         else:

@@ -14,6 +14,9 @@ class ChatResponse(BaseModel):
     table: list[list[str]] | None = None
     conversation_id: int | None = None
     generated_query: str | None = None
+    assumptions: list[str] = Field(default_factory=list)
+    all_rows: list[list[str]] | None = None
+    can_show_rows: bool | None = None
 
 
 class PublicChatRequest(BaseModel):
@@ -39,6 +42,9 @@ class PublicChatResponse(BaseModel):
     status: Literal["success", "error"] = "success"
     conversation_id: Optional[int] = None
     table: Optional[list[list[str]]] = None
+    assumptions: Optional[list[str]] = None
+    all_rows: Optional[list[list[str]]] = None
+    can_show_rows: Optional[bool] = None
 
 
 class ConversationTitleUpdate(BaseModel):
@@ -55,6 +61,8 @@ class Intent(BaseModel):
         "range_records",
         "difference",
         "highest",
+        "lowest",
+        "clarify",
         "day_records",
         "day_range",
         "row_count",

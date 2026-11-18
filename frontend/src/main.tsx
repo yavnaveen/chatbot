@@ -7,6 +7,9 @@ type ChatMessage = {
   role: 'user' | 'assistant'
   content: string
   rows?: string[][]
+  all_rows?: string[][]
+  assumptions?: string[]
+  can_show_rows?: boolean
   generated_query?: string | null
   created_at?: string
 }
@@ -14,11 +17,14 @@ type ChatResponse = {
   success: boolean
   answer: string
   table?: string[][] | null
+  all_rows?: string[][] | null
+  assumptions?: string[]
+  can_show_rows?: boolean
   conversation_id: number
   generated_query?: string | null
 }
 
-const API_BASE = 'http://127.0.0.1:8000'
+const API_BASE = ''
 const DEFAULT_API_KEY = '3Wl2M691mvWR1TsJteWUav8r_n5No3MutqPmRV89D2U'
 
 function getHeaders(customHeaders: Record<string, string> = {}): Record<string, string> {
@@ -190,6 +196,8 @@ function App() {
   const [editingId, setEditingId] = useState<number | null>(null)
   const [editingTitle, setEditingTitle] = useState('')
   const [chartViews, setChartViews] = useState<Record<number, boolean>>({})
+  const [expandedRecords, setExpandedRecords] = useState<Record<number, boolean>>({})
+  const [rowLimits, setRowLimits] = useState<Record<number, number>>({})
   const bottomRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -302,7 +310,10 @@ function App() {
         {
           role: 'assistant',
           content: cleanAnswer(data.answer),
-          rows: data.table ?? [],
+          rows: data.table && data.table.length > 0 ? data.table : undefined,
+          all_rows: data.all_rows ?? data.table ?? undefined,
+          assumptions: data.assumptions ?? [],
+          can_show_rows: data.can_show_rows,
           generated_query: data.generated_query,
         },
       ])
@@ -376,46 +387,109 @@ function App() {
               <div className="bubble">
                 {cleanAnswer(message.content)}
 
-                {message.rows && message.rows.length > 0 && (
-                  <div className="table-wrapper-box">
-                    <div className="table-toolbar">
-                      <span className="record-badge">{message.rows.length - 1} records</span>
-                      <div className="toolbar-buttons">
-                        {message.rows.length > 2 && (
-                          <button className="btn-secondary" onClick={() => toggleChart(index)}>
-                            {chartViews[index] ? '📋 View Table' : '📊 View Chart'}
-                          </button>
-                        )}
-                        <button className="btn-secondary" onClick={() => exportToCsv(message.rows!)}>
-                          📥 Export CSV
-                        </button>
-                      </div>
-                    </div>
-
-                    {chartViews[index] ? (
-                      <SvgChart rows={message.rows} />
-                    ) : (
-                      <div className="table-wrap">
-                        <table>
-                          <thead>
-                            <tr>
-                              {message.rows[0].map((cell) => <th key={cell}>{cell}</th>)}
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {message.rows.slice(1).map((row, rowIndex) => (
-                              <tr key={rowIndex}>
-                                {row.map((cell, cellIndex) => (
-                                  <td key={`${rowIndex}-${cellIndex}`}>{cell}</td>
-                                ))}
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    )}
+                {message.assumptions && message.assumptions.length > 0 && (
+                  <div className="assumptions-box">
+                    {message.assumptions.map((item, i) => (
+                      <div key={i} className="assumption-item">{item}</div>
+                    ))}
                   </div>
                 )}
+
+                {(() => {
+                  const effectiveRows = (message.rows && message.rows.length > 0)
+                    ? message.rows
+                    : (expandedRecords[index] && message.all_rows && message.all_rows.length > 0)
+                      ? message.all_rows
+                      : null;
+
+                  if (!effectiveRows) {
+                    if (message.can_show_rows && message.all_rows && message.all_rows.length > 1) {
+                      const hasTot = message.all_rows[message.all_rows.length - 1][0] === 'Total';
+                      const count = hasTot ? message.all_rows.length - 2 : message.all_rows.length - 1;
+                      return (
+                        <div className="show-records-action">
+                          <button
+                            className="btn-show-records"
+                            onClick={() => setExpandedRecords((prev) => ({ ...prev, [index]: true }))}
+                          >
+                            📋 Show records ({count} {count === 1 ? 'record' : 'records'})
+                          </button>
+                        </div>
+                      );
+                    }
+                    return null;
+                  }
+
+                  const header = effectiveRows[0];
+                  const hasTotalRow = effectiveRows[effectiveRows.length - 1][0] === 'Total';
+                  const dataRows = hasTotalRow ? effectiveRows.slice(1, -1) : effectiveRows.slice(1);
+                  const totalRow = hasTotalRow ? effectiveRows[effectiveRows.length - 1] : null;
+
+                  const limit = rowLimits[index] || 20;
+                  const visibleDataRows = dataRows.slice(0, limit);
+                  const totalCount = dataRows.length;
+
+                  return (
+                    <div className="table-wrapper-box">
+                      <div className="table-toolbar">
+                        <span className="record-badge">
+                          {limit < totalCount ? `Showing ${visibleDataRows.length} of ${totalCount} records` : `${totalCount} ${totalCount === 1 ? 'record' : 'records'}`}
+                        </span>
+                        <div className="toolbar-buttons">
+                          {dataRows.length > 1 && (
+                            <button className="btn-secondary" onClick={() => toggleChart(index)}>
+                              {chartViews[index] ? '📋 View Table' : '📊 View Chart'}
+                            </button>
+                          )}
+                          <button className="btn-secondary" onClick={() => exportToCsv(message.all_rows || effectiveRows)}>
+                            📥 Export CSV
+                          </button>
+                        </div>
+                      </div>
+
+                      {chartViews[index] ? (
+                        <SvgChart rows={effectiveRows} />
+                      ) : (
+                        <div className="table-wrap">
+                          <table>
+                            <thead>
+                              <tr>
+                                {header.map((cell) => <th key={cell}>{cell}</th>)}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {visibleDataRows.map((row, rowIndex) => (
+                                <tr key={rowIndex}>
+                                  {row.map((cell, cellIndex) => (
+                                    <td key={`${rowIndex}-${cellIndex}`}>{cell}</td>
+                                  ))}
+                                </tr>
+                              ))}
+                              {totalRow && (
+                                <tr key="total-row" style={{ fontWeight: 600 }}>
+                                  {totalRow.map((cell, cellIndex) => (
+                                    <td key={`total-${cellIndex}`}>{cell}</td>
+                                  ))}
+                                </tr>
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+
+                      {limit < totalCount && (
+                        <div className="show-more-box">
+                          <button
+                            className="btn-show-more"
+                            onClick={() => setRowLimits((prev) => ({ ...prev, [index]: (prev[index] || 20) + 20 }))}
+                          >
+                            ▼ Show more ({totalCount - limit} remaining)
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
             </div>
           ))}

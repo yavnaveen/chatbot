@@ -9,6 +9,7 @@ from rapidfuzz import fuzz, process
 from backend.app.config import OLLAMA_MODEL, OLLAMA_URL
 from backend.app.nlp.extractor import extract_entities
 from backend.app.nlp.normalize import normalize_question
+from backend.app.nlp.validator import has_topic_evidence
 
 LLM_SYSTEM_PROMPT = """You are a strict JSON classifier for a Tunnel Excavation database.
 The database contains 56 daily records across January (01-01-2025 to 31-01-2025) and February (01-02-2025 to 25-02-2025).
@@ -73,10 +74,11 @@ PROMPT_INJECTIONS = (
 )
 
 OUT_OF_SCOPE_WORDS = (
-    "prime minister", "president", "capital of", "weather", "mausam",
+    "prime minister", "finance minister", "chief minister", "minister", "president", "capital of", "weather", "mausam",
     "cricket", "world cup", "football", "joke", "recipe", "python code",
     "write code", "html", "javascript", "solve this math", "25 * 4",
-    "who is the", "who was", "movie", "song", "poem", "currency", "train", "flight"
+    "who is the", "who was", "movie", "song", "poem", "currency", "train", "flight",
+    "who is", "who are", "tell me a joke"
 )
 
 
@@ -86,7 +88,7 @@ def deterministic_classify(raw_question: str, normalized: str, entities: Dict[st
     raw_lower = raw_question.lower()
 
     # 1. Destructive mutation
-    if any(k in raw_lower or k in q_lower for k in MUTATION_KEYWORDS):
+    if any(re.search(rf"\b{re.escape(k)}\b", raw_lower) or re.search(rf"\b{re.escape(k)}\b", q_lower) for k in MUTATION_KEYWORDS):
         return {
             "reasoning": "Detected SQL mutation keyword.",
             "corrected_question": raw_question,
@@ -108,7 +110,7 @@ def deterministic_classify(raw_question: str, normalized: str, entities: Dict[st
         }
 
     # 3. Prompt injection
-    if any(p in raw_lower for p in PROMPT_INJECTIONS):
+    if any(re.search(rf"\b{re.escape(p)}\b", raw_lower) for p in PROMPT_INJECTIONS):
         return {
             "reasoning": "Prompt injection attempt.",
             "corrected_question": raw_question,
@@ -118,8 +120,8 @@ def deterministic_classify(raw_question: str, normalized: str, entities: Dict[st
             **entities,
         }
 
-    # 4. Out of scope
-    if any(w in raw_lower for w in OUT_OF_SCOPE_WORDS) and not any(k in q_lower for k in ("excavation", "support", "chainage", "pull", "volume")):
+    # 4. Out of scope explicit phrases
+    if any(re.search(rf"\b{re.escape(w)}\b", raw_lower) for w in OUT_OF_SCOPE_WORDS) and not any(re.search(rf"\b{re.escape(k)}\b", q_lower) for k in ("excavation", "support", "chainage", "pull", "volume")):
         return {
             "reasoning": "General knowledge or off-topic query.",
             "corrected_question": raw_question,
@@ -129,9 +131,37 @@ def deterministic_classify(raw_question: str, normalized: str, entities: Dict[st
             **entities,
         }
 
+    # 4b. Topic Evidence Check (Requirement 3 & 4)
+    topic_ev = has_topic_evidence(raw_question, normalized, entities)
+    if not topic_ev:
+        # If no topic evidence is found in the question:
+        # Check if user asked an ambiguous operation alone (e.g. "minimum", "total", "average")
+        has_op_word = bool(
+            entities.get("aggregate")
+            or re.search(r"\b(?:minimum|min|maximum|max|total|sum|average|avg|lowest|highest|difference|compare|count)\b", q_lower)
+        )
+        if has_op_word:
+            agg_name = entities.get("aggregate") or "minimum"
+            return {
+                "reasoning": "Operation keyword without topic evidence requires clarification.",
+                "corrected_question": f"{agg_name} actual excavation",
+                "confidence": 0.4,
+                "operation": "clarify",
+                "metric": entities.get("metric") or "actual",
+                **entities,
+            }
+        return {
+            "reasoning": "No topic evidence found in question.",
+            "corrected_question": raw_question,
+            "confidence": 0.95,
+            "operation": "out_of_scope",
+            "metric": "actual",
+            **entities,
+        }
+
     # Check for gibberish (no English/Hindi words, high consonant density or random characters)
     letters_only = re.sub(r"[^a-z]", "", q_lower)
-    if len(letters_only) > 6 and not any(k in q_lower for k in ("excavation", "theoretical", "actual", "support", "class", "chainage", "pull", "total", "average", "highest", "lowest", "date", "row", "data", "khudai", "january", "february")):
+    if len(letters_only) > 6 and not any(re.search(rf"\b{re.escape(k)}\b", q_lower) for k in ("excavation", "theoretical", "actual", "support", "class", "chainage", "pull", "total", "average", "highest", "lowest", "date", "row", "data", "khudai", "january", "february")):
         vowels = sum(1 for c in letters_only if c in "aeiou")
         vowel_ratio = vowels / len(letters_only) if letters_only else 0
         if vowel_ratio < 0.15 or vowel_ratio > 0.85:
@@ -147,7 +177,7 @@ def deterministic_classify(raw_question: str, normalized: str, entities: Dict[st
     # 5. Domain operations:
 
     # Row count
-    if any(p in q_lower for p in ("how many rows", "row count", "how many records", "total records", "total rows", "count of rows", "kitne row", "kitna record", "kitne records", "kitni rows", "kitni row", "kitne rows")):
+    if any(re.search(rf"\b{re.escape(p)}\b", q_lower) for p in ("how many rows", "row count", "how many records", "total records", "total rows", "count of rows", "kitne row", "kitna record", "kitne records", "kitni rows", "kitni row", "kitne rows")):
         return {
             "reasoning": "Row count query.",
             "corrected_question": "How many records are in the database?",
@@ -165,7 +195,7 @@ def deterministic_classify(raw_question: str, normalized: str, entities: Dict[st
         or "class-wise" in q_lower
         or "each support class" in q_lower
         or "every support class" in q_lower
-        or ("support class" in q_lower and any(w in q_lower for w in ("each", "every", "all", "which", "breakdown", "wise")))
+        or ("support class" in q_lower and any(re.search(rf"\b{w}\b", q_lower) for w in ("each", "every", "all", "which", "breakdown", "wise")))
         or ("class" in q_lower and "breakdown" in q_lower)
     ):
         return {
@@ -178,7 +208,7 @@ def deterministic_classify(raw_question: str, normalized: str, entities: Dict[st
         }
 
     # Difference / compare
-    if any(w in q_lower for w in ("difference", "compare", "versus", "vs", "farq", "antar")) or (
+    if any(re.search(rf"\b{w}\b", q_lower) for w in ("difference", "compare", "versus", "vs", "farq", "antar")) or (
         "actual" in q_lower and "theoretical" in q_lower and "minus" in q_lower
     ):
         return {
@@ -190,11 +220,11 @@ def deterministic_classify(raw_question: str, normalized: str, entities: Dict[st
             **entities,
         }
 
-    # Highest (only for global peak date/record if no month or support class filter)
+    # Highest (only for "which date had highest" or "highest excavation date")
     has_month_or_class = bool(entities.get("month") or entities.get("support_class") or entities.get("start_ch") is not None)
-    if not has_month_or_class and any(w in q_lower for w in ("highest", "maximum", "max", "peak", "most", "sabse jyada", "sabse adhik")) and ("date" in q_lower or "excavation" in q_lower or "day" in q_lower or "volume" in q_lower):
+    if not has_month_or_class and ("which date" in q_lower or "date" in q_lower) and any(re.search(rf"\b{w}\b", q_lower) for w in ("highest", "maximum", "max", "peak", "most", "sabse jyada", "sabse adhik")):
         return {
-            "reasoning": "Highest excavation query.",
+            "reasoning": "Highest excavation date query.",
             "corrected_question": "Which date had the highest excavation?",
             "confidence": 0.95,
             "operation": "highest",
@@ -202,10 +232,10 @@ def deterministic_classify(raw_question: str, normalized: str, entities: Dict[st
             **entities,
         }
 
-    # Lowest (only for global min date/record if no month or support class filter)
-    if not has_month_or_class and any(w in q_lower for w in ("lowest", "minimum", "min", "least", "sabse kam", "sabse chhota")) and ("date" in q_lower or "excavation" in q_lower or "day" in q_lower or "volume" in q_lower):
+    # Lowest (only for "which date had lowest" or "lowest excavation date")
+    if not has_month_or_class and ("which date" in q_lower or "date" in q_lower) and any(re.search(rf"\b{w}\b", q_lower) for w in ("lowest", "minimum", "min", "least", "sabse kam", "sabse chhota")):
         return {
-            "reasoning": "Lowest excavation query.",
+            "reasoning": "Lowest excavation date query.",
             "corrected_question": "Which date had the lowest excavation?",
             "confidence": 0.95,
             "operation": "lowest",
@@ -230,6 +260,29 @@ def deterministic_classify(raw_question: str, normalized: str, entities: Dict[st
             "reasoning": "Date range records query.",
             "corrected_question": f"Show excavation records from {entities['start_date']} to {entities['end_date']}",
             "confidence": 1.0,
+            "operation": "range_records",
+            "metric": entities.get("metric") or "both",
+            **entities,
+        }
+
+    # All data / range records (e.g. "give me all data", "all data")
+    if any(re.search(rf"\b{re.escape(p)}\b", q_lower) for p in ("all data", "all records", "give me all data", "give me all", "sara data", "saara data", "pura data", "full table", "show all records", "show all data")):
+        return {
+            "reasoning": "All data query.",
+            "corrected_question": "Show all excavation records.",
+            "confidence": 0.95,
+            "operation": "range_records",
+            "metric": "both",
+            **entities,
+        }
+
+    # Show records / data for month (e.g. "show records for january")
+    if entities.get("month") and any(re.search(rf"\b{re.escape(w)}\b", q_lower) for w in ("show", "list", "records", "record", "data")) and not any(re.search(rf"\b{w}\b", q_lower) for w in ("total", "sum", "average", "avg", "minimum", "min", "maximum", "max")):
+        m_name = "January" if entities["month"] == 1 else "February"
+        return {
+            "reasoning": f"Show records for {m_name}.",
+            "corrected_question": f"Show records for {m_name}",
+            "confidence": 0.95,
             "operation": "range_records",
             "metric": entities.get("metric") or "both",
             **entities,

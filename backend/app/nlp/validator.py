@@ -48,6 +48,92 @@ MUTATION_REFUSAL_REPLY = (
 )
 
 
+TOPIC_KEYWORDS = (
+    "excavation",
+    "excavated",
+    "pull",
+    "support",
+    "class",
+    "classes",
+    "chainage",
+    "theoretical",
+    "actual",
+    "volume",
+    "record",
+    "records",
+    "row",
+    "rows",
+    "data",
+    "database",
+    "table",
+    "date",
+    "dates",
+    "khudai",
+    "खुदाई",
+    "tarikh",
+    "तारीख",
+    "vastavik",
+    "sidhantik",
+)
+
+
+def has_topic_evidence(
+    question: str = "",
+    normalized: str = "",
+    intent_or_entities: Optional[dict] = None,
+) -> bool:
+    """Check if the question contains topic evidence:
+    Evidence = a date, month, year, support class letter, chainage numbers, a day range,
+    or a whole-word topic word: excavation, pull, support, class, chainage, theoretical, actual,
+    volume, record(s), row(s), data, database, table, date.
+    Operation words (min, max, minimum, maximum, total, sum, average, avg, highest, lowest, difference,
+    compare, count) are NOT evidence on their own.
+    """
+    q_norm = (normalized or "").lower()
+    q_raw = (question or "").lower()
+    data = intent_or_entities or {}
+
+    # 1. Date
+    if data.get("date") or data.get("start_date") or data.get("end_date"):
+        return True
+    if re.search(r"\b\d{2}-\d{2}-\d{4}\b", q_norm):
+        return True
+
+    # 2. Explicit Month
+    month_regex = r"\b(?:january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sep|october|oct|november|nov|december|dec)\b"
+    if re.search(month_regex, q_norm) or re.search(month_regex, q_raw):
+        return True
+
+    # 3. Explicit Year (typed by user, e.g. 2025)
+    if re.search(r"\b20\d{2}\b", q_raw) or re.search(r"\b20\d{2}\b", q_norm):
+        return True
+
+    # 4. Support Class letter
+    if data.get("support_class"):
+        return True
+    if re.search(r"\b(?:support\s*class|class)\s*[:=]?\s*([a-f])\b|\b([a-f])\s*(?:class|support)\b", q_norm):
+        return True
+
+    # 5. Chainage numbers
+    if data.get("start_ch") is not None or data.get("end_ch") is not None:
+        return True
+    if re.search(r"\b(?:chainage|ch)\b", q_norm):
+        return True
+
+    # 6. Day range or day numbers
+    if data.get("has_day_range") or data.get("start_day") is not None:
+        return True
+    if re.search(r"\b\d{1,2}\s*(?:to|-|se|tak|and)\s*\d{1,2}\b", q_norm):
+        return True
+
+    # 7. Whole-word topic word
+    for word in TOPIC_KEYWORDS:
+        if re.search(rf"\b{re.escape(word)}\b", q_norm) or re.search(rf"\b{re.escape(word)}\b", q_raw):
+            return True
+
+    return False
+
+
 def make_clarify_reply(corrected_question: Optional[str]) -> str:
     """Reply 'Did you mean: <corrected_question>?' with 2-3 example questions."""
     cq = corrected_question or "What was the actual excavation on 01-01-2025?"
@@ -55,7 +141,11 @@ def make_clarify_reply(corrected_question: Optional[str]) -> str:
     return f"Did you mean: '{cq}'?\n\nYou can ask:\n{examples}"
 
 
-def validate_intent_answerability(intent_data: dict) -> Tuple[bool, str, Optional[str]]:
+def validate_intent_answerability(
+    intent_data: dict,
+    raw_question: str = "",
+    normalized: str = "",
+) -> Tuple[bool, str, Optional[str]]:
     """Validate whether the classified intent is answerable from the DB.
     Returns:
         (is_answerable, behavior, reason_or_message)
@@ -73,14 +163,24 @@ def validate_intent_answerability(intent_data: dict) -> Tuple[bool, str, Optiona
     if op == "mutation_refusal":
         return True, "refuse", MUTATION_REFUSAL_REPLY
 
-    # 3. Out of scope with confidence >= 0.7
+    # 3. Topic evidence check (Requirement 3 & 4)
+    has_evidence = has_topic_evidence(raw_question, normalized, intent_data)
+    if not has_evidence:
+        # Never query DB without topic evidence!
+        if op == "out_of_scope" or confidence >= 0.7:
+            return True, "refuse", OUT_OF_SCOPE_REPLY
+        agg = intent_data.get("aggregate")
+        suggested = f"{agg} actual excavation" if agg else "What was the actual excavation on 01-01-2025?"
+        return False, "clarify", make_clarify_reply(corrected or suggested)
+
+    # 4. Out of scope with confidence >= 0.7
     if op == "out_of_scope":
         if confidence >= 0.7:
             return True, "refuse", OUT_OF_SCOPE_REPLY
         else:
             return False, "clarify", make_clarify_reply(corrected)
 
-    # 4. Low confidence or explicit clarify operation
+    # 5. Low confidence or explicit clarify operation
     if confidence < 0.5 or op == "clarify":
         return False, "clarify", make_clarify_reply(corrected)
 
@@ -93,8 +193,13 @@ def validate_intent_answerability(intent_data: dict) -> Tuple[bool, str, Optiona
     elif op == "range_records":
         s_date = intent_data.get("start_date")
         e_date = intent_data.get("end_date")
-        if not s_date or not e_date or not is_valid_date(s_date) or not is_valid_date(e_date):
-            return False, "clarify", make_clarify_reply(f"excavation from 01-01-2025 to 05-01-2025")
+        m = intent_data.get("month")
+        if s_date or e_date:
+            if not s_date or not e_date or not is_valid_date(s_date) or not is_valid_date(e_date):
+                return False, "clarify", make_clarify_reply("excavation from 01-01-2025 to 05-01-2025")
+        elif m is not None:
+            if m not in VALID_MONTHS:
+                return False, "clarify", make_clarify_reply("show records for January")
 
     elif op == "aggregate":
         # Check month if provided

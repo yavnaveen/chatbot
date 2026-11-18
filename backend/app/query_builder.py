@@ -13,8 +13,7 @@ def _date(value: str | None) -> str | None:
     return value
 
 
-def build_query(intent: Intent) -> Select:
-    """Build only pre-defined SQLAlchemy statements; model text never becomes SQL."""
+def get_intent_filters(intent: Intent):
     date = _date(intent.date)
     start_date = _date(intent.start_date)
     end_date = _date(intent.end_date)
@@ -47,6 +46,26 @@ def build_query(intent: Intent) -> Select:
         filters.append(ExcavationRecord.start_ch >= intent.start_ch)
     if intent.end_ch is not None:
         filters.append(ExcavationRecord.end_ch <= intent.end_ch)
+    if intent.operation == "day_range":
+        s_day = intent.start_day or 1
+        e_day = intent.end_day or 31
+        day_expr = func.cast(func.substr(ExcavationRecord.date, 1, 2), Integer)
+        filters.append(and_(day_expr >= s_day, day_expr <= e_day))
+    return filters, sortable_date
+
+
+def build_records_query(intent: Intent) -> Select:
+    """Build a SELECT statement returning ExcavationRecord objects matching the intent filters."""
+    filters, sortable_date = get_intent_filters(intent)
+    stmt = select(ExcavationRecord)
+    if filters:
+        stmt = stmt.where(and_(*filters))
+    return stmt.order_by(sortable_date)
+
+
+def build_query(intent: Intent) -> Select:
+    """Build only pre-defined SQLAlchemy statements; model text never becomes SQL."""
+    filters, sortable_date = get_intent_filters(intent)
     where = and_(*filters) if filters else None
 
     def filtered(statement: Select) -> Select:
@@ -61,13 +80,11 @@ def build_query(intent: Intent) -> Select:
     if intent.operation == "day_records":
         return filtered(select(ExcavationRecord)).order_by(sortable_date)
     if intent.operation == "day_range":
-        s_day = intent.start_day or 1
-        e_day = intent.end_day or 31
-        day_expr = func.cast(func.substr(ExcavationRecord.date, 1, 2), Integer)
-        range_filter = and_(day_expr >= s_day, day_expr <= e_day)
-        return filtered(select(ExcavationRecord).where(range_filter)).order_by(sortable_date)
+        return filtered(select(ExcavationRecord)).order_by(sortable_date)
     if intent.operation == "highest":
         return filtered(select(ExcavationRecord)).order_by(ExcavationRecord.actual_volume.desc(), sortable_date).limit(1)
+    if intent.operation == "lowest":
+        return filtered(select(ExcavationRecord)).order_by(ExcavationRecord.actual_volume.asc(), sortable_date).limit(1)
     if intent.operation == "group_by_support":
         if intent.metric == "both":
             statement = select(
@@ -88,5 +105,6 @@ def build_query(intent: Intent) -> Select:
     if intent.metric == "both":
         return filtered(select(aggregate(ExcavationRecord.theoretical_volume), aggregate(ExcavationRecord.actual_volume)))
     column = ExcavationRecord.theoretical_volume if intent.metric == "theoretical" else ExcavationRecord.actual_volume
+    return filtered(select(aggregate(column)))
     return filtered(select(aggregate(column)))
 

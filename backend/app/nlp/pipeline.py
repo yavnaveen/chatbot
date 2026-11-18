@@ -36,28 +36,32 @@ async def process_question(
         mock=mock,
     )
 
-    # 4. Strict Code Override: Extracted entities always override LLM entities
-    for key in (
-        "date",
-        "start_date",
-        "end_date",
-        "month",
-        "year",
-        "support_class",
-        "start_ch",
-        "end_ch",
-        "day",
-        "start_day",
-        "end_day",
-    ):
-        if entities.get(key) is not None:
-            intent_data[key] = entities[key]
-    if entities.get("metric") and entities["metric"] != "actual":
-        intent_data["metric"] = entities["metric"]
-    if entities.get("aggregate"):
-        intent_data["aggregate"] = entities["aggregate"]
+    # 4. Strict Code Override: Extracted entities override LLM entities ONLY if LLM did not return out_of_scope/chat/mutation_refusal
+    llm_op = intent_data.get("operation")
+    if llm_op not in ("out_of_scope", "chat", "mutation_refusal"):
+        for key in (
+            "date",
+            "start_date",
+            "end_date",
+            "month",
+            "year",
+            "support_class",
+            "start_ch",
+            "end_ch",
+            "day",
+            "start_day",
+            "end_day",
+        ):
+            if entities.get(key) is not None:
+                intent_data[key] = entities[key]
+        if entities.get("metric") and entities["metric"] != "actual":
+            intent_data["metric"] = entities["metric"]
+        if entities.get("aggregate"):
+            intent_data["aggregate"] = entities["aggregate"]
 
-    # 5. Validator
-    is_valid, behavior, message = validate_intent_answerability(intent_data)
+    # 5. Validator (topic evidence check, DB boundaries, confidence)
+    is_valid, behavior, message = validate_intent_answerability(
+        intent_data, raw_question=raw_question, normalized=normalized
+    )
 
     return intent_data, is_valid, behavior, message
