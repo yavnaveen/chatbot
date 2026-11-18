@@ -404,10 +404,7 @@ export function App() {
       <aside className={`side ${sidebarOpen ? 'open' : ''}`}>
         <div className="brand">
           <div className="logo">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2" aria-hidden="true">
-              <path d="M3 20V12a9 9 0 0 1 18 0v8" />
-              <path d="M8 20v-8a4 4 0 0 1 8 0v8" />
-            </svg>
+            <img src="/siso-icon.png" alt="SISO Logo" className="brand-logo-img" />
           </div>
           <span>SISO AI</span>
         </div>
@@ -498,7 +495,9 @@ export function App() {
         <div className="feed" aria-live="polite">
           {messages.length === 0 && (
             <div className="empty-state-card">
-              <div className="empty-state-icon">🚇</div>
+              <div className="empty-state-icon">
+                <img src="/siso-icon.png" alt="SISO Logo" style={{ width: 52, height: 52, objectFit: 'contain' }} />
+              </div>
               <h2>SISO AI Assistant</h2>
               <p>Ask about excavation dates, pull, support classes (A-F), chainage, or compare theoretical vs actual volume.</p>
             </div>
