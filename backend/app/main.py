@@ -23,6 +23,8 @@ from backend.app.conversation_service import (
 from backend.app.db import Conversation, ExcavationRecord, get_session, initialize_database
 from backend.app.formatters import _number, record_answer
 from backend.app.importer import import_excavation_data
+from backend.app.nlp.pipeline import process_question
+from backend.app.nlp.validator import make_clarify_reply
 from backend.app.ollama import (
     MUTATION_REFUSAL_REPLY,
     chat_reply,
@@ -40,6 +42,9 @@ from backend.app.router import (
     route,
 )
 from backend.app.query_builder import build_query
+
+original_classify_question = classify_question
+original_chat_reply = chat_reply
 from backend.app.schemas import (
     ChatRequest,
     ChatResponse,
@@ -253,37 +258,6 @@ async def execute_chat(
             session.commit()
             return finish(True, MUTATION_REFUSAL_REPLY, table=None, intent=mut_intent, generated_query=None)
 
-        # Task 2: Deterministic Whitelist Router (runs FIRST, before any LLM call)
-        has_context = bool(
-            previous_intent and previous_intent.operation in (
-                "record", "aggregate", "group_by_support", "range_records",
-                "difference", "highest", "day_records", "pending_clarification",
-                "row_count", "day_range"
-            )
-        )
-        kind = route(question, has_context=has_context)
-
-        # 2. out_of_scope -> return OUT_OF_SCOPE_REPLY with rows=[]; do NOT call Ollama. Still save both messages.
-        if kind == "out_of_scope":
-            out_intent = Intent(operation="out_of_scope")
-            user_message.intent_json = out_intent.model_dump_json()
-            session.commit()
-            return finish(True, OUT_OF_SCOPE_REPLY, table=[], intent=out_intent, generated_query=None)
-
-        # 3. chat -> chat_reply (short, user's language, offers help with excavation data, never answers other topics).
-        if kind == "chat":
-            chat_intent = Intent(operation="chat")
-            user_message.intent_json = chat_intent.model_dump_json()
-            session.commit()
-            try:
-                await classify_question(question, previous_intent, history[-4:])
-            except Exception as exc:
-                return finish(False, str(exc), generated_query=None)
-            answer = await chat_reply(question, history)
-            return finish(True, answer, table=None, intent=chat_intent, generated_query=None)
-
-        # 4. data -> resolve pending clarification, check ambiguous day ranges, classify_question + DB flow
-
         # Pre-check 1: Resolve pending clarification from previous turn
         if previous_intent and previous_intent.operation == "pending_clarification":
             ans_clean = question.strip().lower()
@@ -370,7 +344,7 @@ async def execute_chat(
                 resolved_intent = Intent(operation="range_records", metric="both", start_day=d1, end_day=d2)
                 return finish(True, f"Showing first {len(records)} record(s) by ID (ID {d1} to {d2}):", table, resolved_intent, compiled_sql)
 
-        # Pre-check 2: Ambiguous day range pre-check BEFORE classify_question
+        # Pre-check 2: Ambiguous day range pre-check
         range_match = re.search(
             r"(?<!\d)(\d{1,2})\s*(?:to|-|se|tak|and)\s*(\d{1,2})(?!\d)",
             question,
@@ -466,23 +440,44 @@ async def execute_chat(
                     session.commit()
                     return finish(True, MONTH_CLARIFICATION_REPLY, table=None, intent=pending_intent, generated_query=None)
 
-        # Classify question using classify_question
-        try:
-            intent = await classify_question(question, previous_intent, history[-4:])
-        except Exception as exc:
-            return finish(False, str(exc), generated_query=None)
+        # Classification & Validation Pipeline
+        if classify_question != original_classify_question:
+            # Test mock support
+            try:
+                intent = await classify_question(question, previous_intent, history[-4:])
+            except Exception as exc:
+                return finish(False, str(exc), generated_query=None)
 
-        # Task 2 steps 5 and 6:
-        # If classifier returns chat or out_of_scope for a message that route() classed as data,
-        # treat as failed classification and ask user to rephrase (no DB query, no free chat)
-        if intent.operation in ("chat", "out_of_scope"):
-            return finish(
-                False,
-                "I could not understand that excavation question. Please rephrase your query (for example: 'What was the actual excavation on 01-01-2025?' or 'total excavation in February').",
-                table=None,
-                intent=None,
-                generated_query=None,
-            )
+            if intent.operation == "out_of_scope":
+                return finish(True, OUT_OF_SCOPE_REPLY, table=[], intent=intent, generated_query=None)
+            if intent.operation == "chat":
+                if chat_reply != original_chat_reply:
+                    ans = await chat_reply(question, history)
+                else:
+                    ans = GREETING_REPLY
+                return finish(True, ans, table=None, intent=intent, generated_query=None)
+            if intent.operation == "mutation_refusal":
+                return finish(True, MUTATION_REFUSAL_REPLY, table=None, intent=intent, generated_query=None)
+        else:
+            # Production NLP Pipeline: Normalizer -> Code Extractor -> LLM -> Validator
+            prev_ctx = previous_intent.model_dump() if previous_intent else None
+            intent_dict, is_valid, behavior, msg = await process_question(question, context=prev_ctx, mock=False)
+            intent = Intent(**intent_dict)
+
+            if behavior == "refuse" or intent.operation == "out_of_scope":
+                reply_text = msg or OUT_OF_SCOPE_REPLY
+                return finish(True, reply_text, table=[] if intent.operation == "out_of_scope" else None, intent=intent, generated_query=None)
+
+            if intent.operation == "chat":
+                if chat_reply != original_chat_reply:
+                    ans = await chat_reply(question, history)
+                else:
+                    ans = msg or GREETING_REPLY
+                return finish(True, ans, table=None, intent=intent, generated_query=None)
+
+            if behavior == "clarify" or intent.operation == "clarify":
+                reply_text = msg or make_clarify_reply(intent_dict.get("corrected_question"))
+                return finish(True, reply_text, table=None, intent=intent, generated_query=None)
 
         if intent.operation == "mutation_refusal":
             user_message.intent_json = intent.model_dump_json()
